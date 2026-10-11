@@ -18,6 +18,8 @@ import android.hardware.camera2.TotalCaptureResult
 import android.media.ImageReader
 import android.os.Handler
 import android.os.HandlerThread
+import android.util.Log
+import android.view.WindowManager
 import androidx.core.content.ContextCompat
 import java.io.ByteArrayOutputStream
 import java.io.File
@@ -33,18 +35,22 @@ import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 
 private const val CAMERA_CAPTURE_TIMEOUT_MS = 12_000L
+private const val TAG = "XiaozhiClient"
 
 /**
- * 摄像头模组在整机里是倒装的，拍出来的画面需要转 180° 才是正的；
- * 之前写死为 0，导致云端模型看到的是倒像。
+ * 上传前把像素**真的转正**，而不是只改 EXIF 方向标签。
  *
  * 注意：不要用 `CaptureRequest.JPEG_ORIENTATION` 来做这件事——它只改 EXIF 标签、
  * 不动像素数据。实测设成 180 之后，文件仍是 1280x720 的原始朝向 + Orientation=3，
  * 云端视觉链路一旦不读 EXIF，模型看到的照样是倒的。
  * 所以这里保持 EXIF 为正常朝向，自己把像素转正后再上传。
+ *
+ * 转多少度由 [CameraSelection.pixelRotationDegrees] 按摄像头类型算，不再是一个写死的
+ * 常数：外接模组是倒装的（API 里查不到，只能写死 180），内建摄像头的
+ * `SENSOR_ORIENTATION` 可信，要按屏幕方向算。对 TV5701 来说这个区别就是"能看"和
+ * "看到一张躺着的图"的区别。
  */
 private const val CAMERA_JPEG_ORIENTATION = 0
-private const val CAMERA_PIXEL_ROTATION_DEGREES = 180
 private const val CAMERA_JPEG_QUALITY = 92
 data class VisionEndpoint(
     val url: String,
@@ -117,11 +123,11 @@ class CameraVisionTool(
      * 把拍摄到的 JPEG 像素真正旋转到位（而不是只写 EXIF 方向标签），
      * 这样无论云端视觉链路读不读 EXIF，模型看到的都是正的。
      */
-    private fun rotatePixels(bytes: ByteArray): ByteArray {
-        if (CAMERA_PIXEL_ROTATION_DEGREES == 0) return bytes
+    private fun rotatePixels(bytes: ByteArray, degrees: Int): ByteArray {
+        if (degrees == 0) return bytes
         return runCatching {
             val source = BitmapFactory.decodeByteArray(bytes, 0, bytes.size) ?: return bytes
-            val matrix = Matrix().apply { postRotate(CAMERA_PIXEL_ROTATION_DEGREES.toFloat()) }
+            val matrix = Matrix().apply { postRotate(degrees.toFloat()) }
             val rotated = Bitmap.createBitmap(source, 0, 0, source.width, source.height, matrix, true)
             val output = ByteArrayOutputStream()
             rotated.compress(Bitmap.CompressFormat.JPEG, CAMERA_JPEG_QUALITY, output)
@@ -132,30 +138,41 @@ class CameraVisionTool(
     }
 
     /**
-     * 把最近一次拍摄的原始 JPEG 写到应用外部私有目录，供开发期核对画面方向。
-     * 只保留最近一帧，不累积。
+     * 把最近一次拍摄的 JPEG 写到应用外部私有目录，供开发期核对画面方向。
+     *
+     * 转正前后的**都**留一份：`last_capture_raw.jpg` 是传感器原始朝向，
+     * `last_capture.jpg` 是实际上传的那张。只保留最近一帧，不累积。
+     * 方向这事光看代码看不出来，得把图拉下来看。
      */
-    private fun dumpCaptureForDebug(bytes: ByteArray) {
+    private fun dumpCaptureForDebug(bytes: ByteArray, name: String) {
         runCatching {
             val dir = context.getExternalFilesDir("captures") ?: return
             if (!dir.exists()) dir.mkdirs()
-            File(dir, "last_capture.jpg").writeBytes(bytes)
+            File(dir, name).writeBytes(bytes)
         }
     }
 
     @SuppressLint("MissingPermission")
     private suspend fun captureJpeg(): ByteArray = suspendCancellableCoroutine { continuation ->
         val cameraManager = context.getSystemService(CameraManager::class.java)
-        val cameraId = try {
-            selectCameraId(cameraManager)
+        val camera = try {
+            selectCamera(cameraManager)
         } catch (error: Exception) {
             continuation.resumeWith(Result.failure(error))
             return@suspendCancellableCoroutine
         }
+        val rotationDegrees = CameraSelection.pixelRotationDegrees(camera, deviceRotationDegrees())
+        val frameSize = supportedJpegSize(cameraManager, camera.id) ?: CameraSelection.PREFERRED_JPEG_SIZE
+        Log.d(
+            TAG,
+            "[CAMERA] 选中摄像头 ${camera.id}（${if (camera.isExternal) "外接" else "内建"}，" +
+                "传感器 ${camera.sensorOrientationDegrees}°），上传前转 $rotationDegrees°，" +
+                "输出 ${frameSize.width}x${frameSize.height}",
+        )
 
         val thread = HandlerThread("xiaozhi-camera").apply { start() }
         val handler = Handler(thread.looper)
-        val reader = ImageReader.newInstance(1280, 720, ImageFormat.JPEG, 2)
+        val reader = ImageReader.newInstance(frameSize.width, frameSize.height, ImageFormat.JPEG, 2)
         val finished = AtomicBoolean(false)
         // 这两个句柄跨线程读写：`onOpened` / `onDisconnected` / `onError` 在 HandlerThread
         // 的回调线程上写，而 `closeResources()` 还会在**取消该协程的线程**上执行
@@ -190,8 +207,9 @@ class CameraVisionTool(
                         ?: throw IOException("Camera returned an empty JPEG frame")
                     val bytes = ByteArray(buffer.remaining())
                     buffer.get(bytes)
-                    val normalized = rotatePixels(bytes)
-                    dumpCaptureForDebug(normalized)
+                    val normalized = rotatePixels(bytes, rotationDegrees)
+                    dumpCaptureForDebug(bytes, "last_capture_raw.jpg")
+                    dumpCaptureForDebug(normalized, "last_capture.jpg")
                     complete(Result.success(normalized))
                 }
             } catch (error: Exception) {
@@ -212,7 +230,7 @@ class CameraVisionTool(
         }
 
         try {
-            cameraManager.openCamera(cameraId, object : CameraDevice.StateCallback() {
+            cameraManager.openCamera(camera.id, object : CameraDevice.StateCallback() {
                 override fun onOpened(openedDevice: CameraDevice) {
                     if (finished.get()) {
                         runCatching { openedDevice.close() }
@@ -295,12 +313,53 @@ class CameraVisionTool(
         }
     }
 
-    private fun selectCameraId(cameraManager: CameraManager): String {
-        return cameraManager.cameraIdList
-            .firstOrNull { id ->
-                cameraManager.getCameraCharacteristics(id)
-                    .get(CameraCharacteristics.LENS_FACING) == CameraCharacteristics.LENS_FACING_EXTERNAL
+    /**
+     * 枚举本机摄像头并挑一台。
+     *
+     * 照 `workdayAlarmClockAndroid` 的 `AvcCameraPipeline` 那样**遍历 `cameraIdList` 全部条目**
+     * （那边是 `enumerateTargets(...).getOrNull(cameraIndex)`），不拿 `LENS_FACING` 当门槛。
+     * 原来这里只认 `LENS_FACING_EXTERNAL`，于是在 TV5701 上直接抛
+     * `No external USB camera is available`——那台机器只有一台 `internal/0`、
+     * `LENS_FACING_BACK` 的内置摄像头，`/dev/video*` 根本不存在。设了门槛就等于"没有摄像头"。
+     *
+     * 挑哪一台交给 [CameraSelection.choose]：有外接仍然优先外接，保住 RK3568 的既有行为。
+     */
+    private fun selectCamera(cameraManager: CameraManager): CameraCandidate {
+        val candidates = cameraManager.cameraIdList.mapNotNull { id ->
+            runCatching {
+                val characteristics = cameraManager.getCameraCharacteristics(id)
+                CameraCandidate(
+                    id = id,
+                    isExternal = characteristics.get(CameraCharacteristics.LENS_FACING) ==
+                        CameraCharacteristics.LENS_FACING_EXTERNAL,
+                    sensorOrientationDegrees =
+                        characteristics.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 0,
+                )
             }
-            ?: throw IOException("No external USB camera is available")
+                .onFailure { Log.w(TAG, "[CAMERA] 读不到摄像头 $id 的特征：${it.message}") }
+                .getOrNull()
+        }
+        return CameraSelection.choose(candidates)
+            ?: throw IOException("本机没有可用的摄像头")
     }
+
+    /** 这台摄像头支持哪些 JPEG 输出尺寸。读不到就返回 null，由调用方退回首选尺寸。 */
+    private fun supportedJpegSize(cameraManager: CameraManager, cameraId: String): FrameSize? = runCatching {
+        val map = cameraManager.getCameraCharacteristics(cameraId)
+            .get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
+            ?: return@runCatching null
+        CameraSelection.chooseJpegSize(
+            map.getOutputSizes(ImageFormat.JPEG).orEmpty().map { FrameSize(it.width, it.height) },
+        )
+    }.getOrNull()
+
+    /**
+     * 当前屏幕方向。App 跑在 kiosk 里、方向由系统定（TV5701 实测 rotation 3 = 270°），
+     * 取不到就按 0 算——宁可图歪一点，也不能因为读个屏幕方向就把拍照整条挂掉。
+     */
+    @Suppress("DEPRECATION")
+    private fun deviceRotationDegrees(): Int = runCatching {
+        val windowManager = context.getSystemService(WindowManager::class.java)
+        CameraSelection.rotationDegreesOf(windowManager.defaultDisplay.rotation)
+    }.getOrDefault(0)
 }
