@@ -547,6 +547,7 @@ private fun XiaozhiApp() {
         onClearRoleAvatar = { roleId -> viewModel.clearRoleAvatar(roleId) },
         onClearRolePortrait = { roleId -> viewModel.clearRolePortrait(roleId) },
         onClearRoleVideo = { roleId, slot -> viewModel.clearRoleVideo(roleId, slot) },
+        onDeviceControlEnabledChanged = viewModel::updateDeviceControlEnabled,
     )
     if (uploadSession != null) {
         UploadQrDialog(
@@ -645,6 +646,7 @@ private fun XiaozhiScreen(
     onClearRoleAvatar: (String) -> Unit,
     onClearRolePortrait: (String) -> Unit,
     onClearRoleVideo: (String, DigitalHumanSlot) -> Unit,
+    onDeviceControlEnabledChanged: (Boolean) -> Unit,
 ) {
     var everConnected by rememberSaveable { mutableStateOf(false) }
     var startupGraceElapsed by rememberSaveable { mutableStateOf(false) }
@@ -757,6 +759,7 @@ private fun XiaozhiScreen(
                         onClearRoleAvatar = onClearRoleAvatar,
                         onClearRolePortrait = onClearRolePortrait,
                         onClearRoleVideo = onClearRoleVideo,
+                        onDeviceControlEnabledChanged = onDeviceControlEnabledChanged,
                     )
                 }
             }
@@ -1483,6 +1486,7 @@ private fun SettingsScreen(
     onClearRoleAvatar: (String) -> Unit,
     onClearRolePortrait: (String) -> Unit,
     onClearRoleVideo: (String, DigitalHumanSlot) -> Unit,
+    onDeviceControlEnabledChanged: (Boolean) -> Unit,
 ) {
     val scrollState = rememberScrollState()
 
@@ -1514,6 +1518,41 @@ private fun SettingsScreen(
             state = state,
             onCheckForUpdate = onCheckForUpdate,
             onStartUpdate = onStartUpdate,
+        )
+
+        DeviceControlCard(
+            state = state,
+            onDeviceControlEnabledChanged = onDeviceControlEnabledChanged,
+        )
+    }
+}
+
+/**
+ * 本地设备控制卡片：一个总开关，加一行本机硬件的自检结果。
+ *
+ * 为什么要把自检结果摆到界面上：云台和补光灯都是靠厂商挂在 `PowerManager` 上的扩展方法
+ * 反射调用的（见 `BodyGuargzController`），这台机器认不认只能实测。把结论写在这儿，
+ * 现场的人一眼就能分清"是功能没开"还是"这台机器压根没有这个硬件"——否则只会看到
+ * "叫它转它不转"，然后以为 App 坏了。
+ */
+@Composable
+private fun DeviceControlCard(
+    state: UiState,
+    onDeviceControlEnabledChanged: (Boolean) -> Unit,
+) {
+    SettingsCard {
+        SettingsSwitch(
+            icon = "🎥",
+            title = "本地设备控制",
+            subtitle = "允许小智用语音控制摄像头云台和补光灯，比如「左转」「打开灯光」。关掉后这些指令不再下发给设备。",
+            checked = state.deviceControlEnabled,
+            onCheckedChange = onDeviceControlEnabledChanged,
+        )
+        HorizontalDivider()
+        SettingsStatus(
+            icon = if (state.deviceControlEnabled) "🔧" else "🚫",
+            title = if (state.deviceControlEnabled) "本机硬件自检" else "本机硬件自检（功能已关闭）",
+            subtitle = state.deviceControlStatus.ifBlank { "正在检测本机的云台和补光灯…" },
         )
     }
 }

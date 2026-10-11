@@ -19,6 +19,8 @@ class McpCameraServer(
     private val isCurrentSession: (String) -> Boolean,
     private val isScheduledDeliveryInProgress: () -> Boolean,
     private val isInitialSupervisionReminderInProgress: () -> Boolean,
+    /** 本地设备（云台 / 补光灯）工具。用户可以在设置里关掉它。 */
+    private val deviceToolSet: DeviceToolSet,
     /** 用户在输入框里打的长文字（listen/detect 发不出去的那部分）。 */
     private val pendingUserMessage: () -> String? = { null },
     private val log: (String) -> Unit,
@@ -80,27 +82,39 @@ class McpCameraServer(
     }
 
     private fun replyToolsList(id: Any) {
-        replyResult(
-            id,
-            JSONObject().put(
-                "tools",
-                JSONArray()
-                    .put(cameraToolSchema())
-                    .put(timerSchema())
-                    .put(timerCurrentSchema())
-                    .put(supervisionStartSchema())
-                    .put(supervisionCurrentSchema())
-                    .put(supervisionCancelSchema())
-                    .put(userMessageSchema()),
-            ),
+        val tools = JSONArray()
+            .put(cameraToolSchema())
+            .put(timerSchema())
+            .put(timerCurrentSchema())
+            .put(supervisionStartSchema())
+            .put(supervisionCurrentSchema())
+            .put(supervisionCancelSchema())
+            .put(userMessageSchema())
+        // 云台/补光灯只在"功能开着且本机确实有这个硬件"时才声明。
+        // 不声明 = 模型不知道它存在 = 不可能误动作，这就是"可以关闭"的落点。
+        val deviceTools = deviceToolSet.schemas()
+        deviceTools.forEach { tools.put(it) }
+        replyResult(id, JSONObject().put("tools", tools))
+        log(
+            if (deviceTools.isEmpty()) {
+                "已向服务端声明摄像头、定时提醒、监督和用户文字工具（本地设备控制未声明）"
+            } else {
+                "已向服务端声明摄像头、定时提醒、监督、用户文字和 ${deviceTools.size} 个本地设备工具"
+            },
         )
-        log("已向服务端声明摄像头、定时提醒、监督和用户文字工具")
     }
 
     private fun handleToolCall(id: Any, params: JSONObject?, requestSessionId: String?) {
         val name = params?.optString("name").orEmpty()
         val args = params?.optJSONObject("arguments") ?: JSONObject()
         log("MCP 调用 $name ${summarizeToolArgs(args)}")
+        if (deviceToolSet.isDeviceTool(name)) {
+            when (val outcome = deviceToolSet.call(name, args)) {
+                is DeviceToolOutcome.Success -> replyResult(id, toolTextResult(outcome.text))
+                is DeviceToolOutcome.Failure -> replyError(id, outcome.message)
+            }
+            return
+        }
         when (name) {
             CAMERA_TOOL_NAME -> {
                 // Camera decisions belong to the model. Android only delivers

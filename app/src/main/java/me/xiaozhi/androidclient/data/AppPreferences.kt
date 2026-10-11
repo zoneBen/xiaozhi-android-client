@@ -32,6 +32,7 @@ private const val KEY_TERMUX_API_COMMAND = "termux_api_command"
 private const val KEY_TERMUX_API_ARGUMENTS = "termux_api_arguments"
 private const val KEY_DEBUG_LOGGING_ENABLED = "debug_logging_enabled"
 private const val KEY_DEBUG_WAV_DUMP_ENABLED = "debug_wav_dump_enabled"
+private const val KEY_DEVICE_CONTROL_ENABLED = "device_control_enabled"
 
 const val DEFAULT_OTA_URL: String = "https://api.tenclass.net/xiaozhi/ota/"
 const val DEFAULT_PROTOCOL_VERSION: String = "1"
@@ -67,6 +68,13 @@ data class StoredConfig(
     val termuxApiArguments: String,
     val debugLoggingEnabled: Boolean,
     val debugWavDumpEnabled: Boolean,
+    /**
+     * 本地设备控制（云台 / 补光灯）总开关，默认开。
+     *
+     * 默认开的理由：这台机器的卖点之一就是"说左转就左转、说开灯就开灯"，
+     * 装完就能用才符合预期；真机没这个硬件时工具也不会被声明（见 DeviceToolSet）。
+     */
+    val deviceControlEnabled: Boolean,
 )
 
 class AppPreferences(private val context: Context) {
@@ -111,6 +119,7 @@ class AppPreferences(private val context: Context) {
             termuxApiArguments = prefs.getString(KEY_TERMUX_API_ARGUMENTS, "") ?: "",
             debugLoggingEnabled = prefs.getBoolean(KEY_DEBUG_LOGGING_ENABLED, false),
             debugWavDumpEnabled = prefs.getBoolean(KEY_DEBUG_WAV_DUMP_ENABLED, false),
+            deviceControlEnabled = prefs.getBoolean(KEY_DEVICE_CONTROL_ENABLED, true),
         )
     }
 
@@ -141,6 +150,7 @@ class AppPreferences(private val context: Context) {
             .putString(KEY_TERMUX_API_ARGUMENTS, config.termuxApiArguments)
             .putBoolean(KEY_DEBUG_LOGGING_ENABLED, config.debugLoggingEnabled)
             .putBoolean(KEY_DEBUG_WAV_DUMP_ENABLED, config.debugWavDumpEnabled)
+            .putBoolean(KEY_DEVICE_CONTROL_ENABLED, config.deviceControlEnabled)
             .apply()
     }
 

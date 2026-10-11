@@ -152,6 +152,15 @@ data class UiState(
     val termuxApiStatus: String = "",
     val debugLoggingEnabled: Boolean = false,
     val debugWavDumpEnabled: Boolean = false,
+
+    /**
+     * 本地设备控制（摄像头云台 / 补光灯）总开关。用户要求"可以关闭"，
+     * 关掉后 `self.device.*` 不再向服务端声明，模型看不到也就调不到。
+     */
+    val deviceControlEnabled: Boolean = true,
+
+    /** 设置页给用户看的一句话：本机到底认没认出云台和补光灯。 */
+    val deviceControlStatus: String = "",
     val connectionStatus: ConnectionStatus = ConnectionStatus.DISCONNECTED,
     val isSilentTransportRecovery: Boolean = false,
     val draftMessage: String = "",

@@ -27,11 +27,13 @@ import me.xiaozhi.androidclient.camera.CameraVisionTool
 import me.xiaozhi.androidclient.data.AppPreferences
 import me.xiaozhi.androidclient.data.RoleProfileRepository
 import me.xiaozhi.androidclient.data.StoredConfig
+import me.xiaozhi.androidclient.device.BodyGuargzController
 import me.xiaozhi.androidclient.util.ImageSampling
 import me.xiaozhi.androidclient.integration.TermuxCommandEvents
 import me.xiaozhi.androidclient.integration.TermuxCommandResult
 import me.xiaozhi.androidclient.integration.TermuxRunner
 import me.xiaozhi.androidclient.integration.NanoSerialBridge
+import me.xiaozhi.androidclient.mcp.DeviceToolSet
 import me.xiaozhi.androidclient.mcp.McpCameraServer
 import me.xiaozhi.androidclient.model.ActivationInfo
 import me.xiaozhi.androidclient.model.ChatMessage
@@ -230,6 +232,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         ::handleScheduledReminderDue,
         ::handleReminderSnapshot,
     )
+    /**
+     * TV5701 上的云台 + 补光灯。构造它只是做几次反射查找，不会碰硬件。
+     *
+     * 为什么可以无条件构造：它自己会判断厂商接口在不在（[BodyGuargzController.describe]），
+     * 不在的机型上 [DeviceToolSet.schemas] 直接返回空，功能自然不出现——
+     * 不用在这台机器上维护机型白名单。
+     */
+    private val bodyGuargzController = BodyGuargzController(application)
+
+    private val deviceToolSet = DeviceToolSet(
+        hardware = bodyGuargzController,
+        enabled = { uiState.value.deviceControlEnabled },
+        log = ::addLog,
+    )
+
     private val mcpCameraServer = McpCameraServer(
         cameraVisionTool = cameraVisionTool,
         realtimeClient = realtimeClient,
@@ -245,6 +262,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         isInitialSupervisionReminderInProgress = {
             activeScheduledPrompt?.text?.startsWith(SUPERVISION_START_CODE_PHRASE) == true
         },
+        deviceToolSet = deviceToolSet,
         pendingUserMessage = ::takePendingUserMessage,
         log = ::addLog,
     )
@@ -266,6 +284,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
         addLog("客户端已就绪")
         addLog("当前使用未烧录设备接入模式")
+        // 云台/补光灯的可用性只能靠反射探测，结果写进日志和设置页。
+        // 这台机器上到底认没认出来，是这一版最需要真机确认的一件事。
+        addLog("本地设备控制：${bodyGuargzController.describe()}")
+        updateState { copy(deviceControlStatus = bodyGuargzController.availabilityLabel()) }
         nanoSerialBridge.start()
         reminderScheduler.start()
         viewModelScope.launch {
@@ -1036,6 +1058,27 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         )
         updateAndPersist { copy(debugWavDumpEnabled = enabled) }
         addLog(if (enabled) "已开启 TTS 音频导出" else "已关闭 TTS 音频导出")
+    }
+
+    /**
+     * 开关本地设备控制（云台 / 补光灯）。
+     *
+     * 关闭时**顺手把执行器拉回安全状态**：灯灭、云台停。理由很直接——关掉之后语音通道没了，
+     * 要是灯还亮着、电机还在转，用户就再没有任何办法把它停下来，只能拔电。
+     * 这个副作用会写进日志，不让它是悄悄发生的。
+     */
+    fun updateDeviceControlEnabled(enabled: Boolean) {
+        updateAndPersist { copy(deviceControlEnabled = enabled) }
+        if (!enabled) {
+            bodyGuargzController.releaseAll()
+        }
+        addLog(
+            if (enabled) {
+                "已开启本地设备控制（云台、补光灯），下次声明工具时生效"
+            } else {
+                "已关闭本地设备控制，并已关闭补光灯、红外灯和云台转动"
+            },
+        )
     }
 
     fun updateWakeWordStatus(status: String) {
@@ -2182,6 +2225,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         cancelExpectedGoodbyeDisconnect()
         realtimeClient.disconnect(notify = false)
         nanoSerialBridge.close()
+        bodyGuargzController.close()
         audioEngine.release()
         super.onCleared()
     }
@@ -2897,6 +2941,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             termuxApiStatus = termuxRunner.termuxApiStatusLabel(storedConfig.termuxEnabled),
             debugLoggingEnabled = storedConfig.debugLoggingEnabled,
             debugWavDumpEnabled = storedConfig.debugWavDumpEnabled,
+            deviceControlEnabled = storedConfig.deviceControlEnabled,
         )
     }
 
@@ -2928,6 +2973,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 termuxApiArguments = uiState.value.termuxApiArguments,
                 debugLoggingEnabled = uiState.value.debugLoggingEnabled,
                 debugWavDumpEnabled = uiState.value.debugWavDumpEnabled,
+                deviceControlEnabled = uiState.value.deviceControlEnabled,
             ),
         )
     }
