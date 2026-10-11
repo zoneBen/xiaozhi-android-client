@@ -14,11 +14,14 @@ import android.hardware.camera2.CameraDevice
 import android.hardware.camera2.CameraManager
 import android.hardware.camera2.CaptureFailure
 import android.hardware.camera2.CaptureRequest
+import android.hardware.camera2.CaptureResult
 import android.hardware.camera2.TotalCaptureResult
 import android.media.ImageReader
 import android.os.Handler
 import android.os.HandlerThread
+import android.os.SystemClock
 import android.util.Log
+import android.util.Range
 import android.view.WindowManager
 import androidx.core.content.ContextCompat
 import java.io.ByteArrayOutputStream
@@ -204,6 +207,21 @@ class CameraVisionTool(
         val handler = Handler(thread.looper)
         val reader = ImageReader.newInstance(frameSize.width, frameSize.height, ImageFormat.JPEG, 2)
         val finished = AtomicBoolean(false)
+        // 真正的那一帧只发一次。`captureStill()` 有两条来路——AE 预热完成、以及拿不到
+        // 预热流时的退路——各自加锁会在同一次拍摄里重复发请求，白拍几帧还多占队列。
+        val stillRequested = AtomicBoolean(false)
+
+        // 曝光时间上限由**帧率区间**决定（1/上限 秒）。HAL 默认区间把帧率钉在 30fps，
+        // 等于把曝光封顶在 1/30 秒，而本机传感器允许到 0.4 秒——暗房里差 12 倍进光量。
+        // 预热和正式拍摄都要带上这一项，否则单给正式那张设也来不及。
+        val fpsRange = lowLightFpsRange(cameraManager, camera.id)
+        // 单独一路预览流，只为了让 AE/AWB 在按快门前收敛，它出的帧不进任何照片。
+        val primer = primingReader(cameraManager, camera.id, handler)
+        Log.d(
+            TAG,
+            "[CAMERA] AE 帧率区间 ${fpsRange?.let { "[${it.lower}, ${it.upper}]" } ?: "机型未上报"}，" +
+                "预热流 ${primer?.let { "${it.width}x${it.height}" } ?: "无（退回直接拍）"}",
+        )
         // 这两个句柄跨线程读写：`onOpened` / `onDisconnected` / `onError` 在 HandlerThread
         // 的回调线程上写，而 `closeResources()` 还会在**取消该协程的线程**上执行
         // （`invokeOnCancellation` 不在回调线程上跑）。
@@ -220,6 +238,7 @@ class CameraVisionTool(
             runCatching { session.get()?.close() }
             runCatching { device.get()?.close() }
             runCatching { reader.close() }
+            runCatching { primer?.close() }
             thread.quitSafely()
         }
 
@@ -227,6 +246,103 @@ class CameraVisionTool(
             if (finished.compareAndSet(false, true)) {
                 closeResources()
                 continuation.resumeWith(result)
+            }
+        }
+
+        /**
+         * 发一次真正的静帧拍摄。
+         *
+         * 这里带 `AE_PRECAPTURE_TRIGGER = START` 不是可选项：本机内核参数
+         * `camera.disable_zsl_mode = 1`，关掉 ZSL 之后 `TEMPLATE_STILL_CAPTURE`
+         * **不再自动跑 precapture 序列**，得由应用显式触发，否则拿到的仍是暗片。
+         */
+        fun captureStill() {
+            if (!stillRequested.compareAndSet(false, true)) return
+            val openedDevice = device.get() ?: return
+            val captureSession = session.get() ?: return
+            try {
+                val request = openedDevice.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE)
+                    .apply {
+                        addTarget(reader.surface)
+                        set(CaptureRequest.CONTROL_MODE, CaptureRequest.CONTROL_MODE_AUTO)
+                        set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
+                        set(CaptureRequest.CONTROL_AWB_MODE, CaptureRequest.CONTROL_AWB_MODE_AUTO)
+                        set(CaptureRequest.JPEG_ORIENTATION, CAMERA_JPEG_ORIENTATION)
+                        fpsRange?.let { set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, it) }
+                        set(
+                            CaptureRequest.CONTROL_AE_PRECAPTURE_TRIGGER,
+                            CaptureRequest.CONTROL_AE_PRECAPTURE_TRIGGER_START,
+                        )
+                    }
+                    .build()
+                captureSession.capture(
+                    request,
+                    object : CameraCaptureSession.CaptureCallback() {
+                        override fun onCaptureFailed(
+                            session: CameraCaptureSession,
+                            request: CaptureRequest,
+                            failure: CaptureFailure,
+                        ) {
+                            complete(Result.failure(IOException("Camera capture failed: ${failure.reason}")))
+                        }
+
+                        override fun onCaptureCompleted(
+                            session: CameraCaptureSession,
+                            request: CaptureRequest,
+                            result: TotalCaptureResult,
+                        ) = Unit
+                    },
+                    handler,
+                )
+            } catch (error: Exception) {
+                complete(Result.failure(error))
+            }
+        }
+
+        /**
+         * 先跑一路重复的预览请求，等 AE 收敛再按键。
+         *
+         * 这就是"参考项目很清楚、我们全黑"的根因所在：那边是**持续推流**，重复请求一刻不停，
+         * AE 一直在收敛；我们原来打开会话就发一次性静帧请求，AE 压根没启动，
+         * 拍到的是传感器上电后的初始帧。这里补上这一步，并在
+         * [AutoExposure.MAX_WAIT_MS] 到点后放弃等待——宁可欠曝一点，也不能卡到超时。
+         */
+        fun startPriming(captureSession: CameraCaptureSession, primingReader: ImageReader) {
+            val openedDevice = device.get() ?: return
+            val startedAt = SystemClock.elapsedRealtime()
+            try {
+                val request = openedDevice.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW)
+                    .apply {
+                        addTarget(primingReader.surface)
+                        set(CaptureRequest.CONTROL_MODE, CaptureRequest.CONTROL_MODE_AUTO)
+                        set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
+                        set(CaptureRequest.CONTROL_AWB_MODE, CaptureRequest.CONTROL_AWB_MODE_AUTO)
+                        fpsRange?.let { set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, it) }
+                        // 这里**故意不设** AE_PRECAPTURE_TRIGGER：这是重复请求，每帧都下
+                        // START 会把 precapture 序列一遍遍重启，AE 永远到不了 CONVERGED，
+                        // 正好退回我们要修的那个症状。START 只留给 captureStill()。
+                    }
+                    .build()
+                captureSession.setRepeatingRequest(
+                    request,
+                    object : CameraCaptureSession.CaptureCallback() {
+                        override fun onCaptureCompleted(
+                            session: CameraCaptureSession,
+                            request: CaptureRequest,
+                            result: TotalCaptureResult,
+                        ) {
+                            val elapsedMs = SystemClock.elapsedRealtime() - startedAt
+                            val readiness = AutoExposure.readinessOfAeState(result.get(CaptureResult.CONTROL_AE_STATE))
+                            if (!AutoExposure.shouldCapture(readiness, elapsedMs)) return
+                            Log.d(TAG, "[CAMERA] AE $readiness（预热 ${elapsedMs}ms），开始拍摄")
+                            runCatching { captureSession.stopRepeating() }
+                            captureStill()
+                        }
+                    },
+                    handler,
+                )
+            } catch (error: Exception) {
+                complete(Result.failure(error))
             }
         }
 
@@ -275,7 +391,10 @@ class CameraVisionTool(
                     // `openCamera()` 调用本身，捕不到这个稍后才执行的回调。
                     try {
                         openedDevice.createCaptureSession(
-                            listOf(reader.surface),
+                            // 预热流和 JPEG 流**一起**开会话：两路都挂在同一个会话里，
+                            // 之后从预热切到拍摄只需换请求，不用重建会话（重建要几百毫秒，
+                            // 而且有些 HAL 重建时会把 AE 状态一起清掉，白预热）。
+                            listOfNotNull(reader.surface, primer?.surface),
                             object : CameraCaptureSession.StateCallback() {
                                 override fun onConfigured(captureSession: CameraCaptureSession) {
                                     if (finished.get()) {
@@ -283,34 +402,13 @@ class CameraVisionTool(
                                         return
                                     }
                                     session.set(captureSession)
-                                    try {
-                                        val request = openedDevice.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE)
-                                            .apply {
-                                                addTarget(reader.surface)
-                                                set(CaptureRequest.JPEG_ORIENTATION, CAMERA_JPEG_ORIENTATION)
-                                            }
-                                            .build()
-                                        captureSession.capture(
-                                            request,
-                                            object : CameraCaptureSession.CaptureCallback() {
-                                                override fun onCaptureFailed(
-                                                    session: CameraCaptureSession,
-                                                    request: CaptureRequest,
-                                                    failure: CaptureFailure,
-                                                ) {
-                                                    complete(Result.failure(IOException("Camera capture failed: ${failure.reason}")))
-                                                }
-
-                                                override fun onCaptureCompleted(
-                                                    session: CameraCaptureSession,
-                                                    request: CaptureRequest,
-                                                    result: TotalCaptureResult,
-                                                ) = Unit
-                                            },
-                                            handler,
-                                        )
-                                    } catch (error: Exception) {
-                                        complete(Result.failure(error))
+                                    val primingReader = primer
+                                    if (primingReader == null) {
+                                        // 机型连一路预览尺寸都报不出来，没法预热。退回直接拍
+                                        // （captureStill() 仍会带 precapture 触发），别让拍照直接失败。
+                                        captureStill()
+                                    } else {
+                                        startPriming(captureSession, primingReader)
                                     }
                                 }
 
@@ -374,13 +472,55 @@ class CameraVisionTool(
     }
 
     /** 这台摄像头支持哪些 JPEG 输出尺寸。读不到就返回 null，由调用方退回首选尺寸。 */
-    private fun supportedJpegSize(cameraManager: CameraManager, cameraId: String): FrameSize? = runCatching {
-        val map = cameraManager.getCameraCharacteristics(cameraId)
-            .get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
-            ?: return@runCatching null
-        CameraSelection.chooseJpegSize(
-            map.getOutputSizes(ImageFormat.JPEG).orEmpty().map { FrameSize(it.width, it.height) },
-        )
+    private fun supportedJpegSize(cameraManager: CameraManager, cameraId: String): FrameSize? =
+        supportedSizes(cameraManager, cameraId, ImageFormat.JPEG)?.let { CameraSelection.chooseJpegSize(it) }
+
+    /**
+     * 开着摄像头能出的所有尺寸。
+     *
+     * 读不到（老 HAL 不报 `SCALER_STREAM_CONFIGURATION_MAP`、或摄像头刚被拔掉）返回 null，
+     * 让调用方各自决定退路——JPEG 那边退到写死的首选尺寸，预热那边退到"不预热直接拍"。
+     */
+    private fun supportedSizes(cameraManager: CameraManager, cameraId: String, format: Int): List<FrameSize>? =
+        runCatching {
+            cameraManager.getCameraCharacteristics(cameraId)
+                .get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
+                ?.getOutputSizes(format)
+                ?.map { FrameSize(it.width, it.height) }
+        }.getOrNull()
+
+    /**
+     * 建一路只用来让 AE 收敛的预览流：`YUV_420_888`，尺寸取支持的最小值。
+     *
+     * 用 YUV 而不是再开一路 JPEG：JPEG 编码要现做，白费 CPU；YUV 是传感器直出的格式，
+     * 几乎所有机型都支持。帧拿到就丢（见下面的监听器），它只负责把 AE/AWB 喂起来。
+     * 一路尺寸都报不出来时返回 null，调用方退回"不预热直接拍"。
+     */
+    private fun primingReader(cameraManager: CameraManager, cameraId: String, handler: Handler): ImageReader? =
+        supportedSizes(cameraManager, cameraId, ImageFormat.YUV_420_888)
+            ?.let { CameraSelection.choosePrimingSize(it) }
+            ?.let { size ->
+                ImageReader.newInstance(size.width, size.height, ImageFormat.YUV_420_888, 2).apply {
+                    // 必须消费，否则队列满了 HAL 会停推，预热就白做了。
+                    setOnImageAvailableListener({ priming ->
+                        runCatching { priming.acquireLatestImage()?.close() }
+                    }, handler)
+                }
+            }
+
+    /**
+     * 本机允许的帧率区间里，**曝光时间能放最长**的那一个。
+     *
+     * `CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES` 给的是
+     * `android.util.Range`，而纯规则那层只认 `IntRange`（好单测），所以在这里转换。
+     * 读不到就返回 null，调用方别设这一项、用 HAL 默认值。
+     */
+    private fun lowLightFpsRange(cameraManager: CameraManager, cameraId: String): Range<Int>? = runCatching {
+        val ranges = cameraManager.getCameraCharacteristics(cameraId)
+            .get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES)
+            .orEmpty()
+            .map { it.lower..it.upper }
+        AutoExposure.lowLightFpsRange(ranges)?.let { Range(it.first, it.last) }
     }.getOrNull()
 
     /**

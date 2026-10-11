@@ -141,6 +141,19 @@ class CameraSelectionTest {
         assertNull(CameraSelection.chooseJpegSize(emptyList()))
     }
 
+    // ---- choosePrimingSize ----
+
+    @Test
+    fun `priming stream takes the smallest supported size`() {
+        val supported = listOf(FrameSize(1440, 720), FrameSize(1280, 720), FrameSize(720, 480))
+        assertEquals(FrameSize(720, 480), CameraSelection.choosePrimingSize(supported))
+    }
+
+    @Test
+    fun `priming stream returns null when nothing is supported`() {
+        assertNull(CameraSelection.choosePrimingSize(emptyList()))
+    }
+
     // ---- FrameSize ----
 
     @Test

@@ -98,6 +98,15 @@ object CameraSelection {
         return pool.filter { it.area <= preferred.area }.maxByOrNull { it.area }
             ?: pool.minByOrNull { it.area }
     }
+
+    /**
+     * 挑一路**只用来让 AE 收敛**的预览流尺寸：支持的最小尺寸。
+     *
+     * 这路流不进任何照片，只负责让 AE/AWB 在真正拍摄前跑起来（见 [AutoExposure]）。
+     * 所以越小越好：省带宽、省内存，也让 HAL 更容易接受"同时开两路"。
+     * 一路都不支持时返回 null，由调用方决定怎么办。
+     */
+    fun choosePrimingSize(supported: List<FrameSize>): FrameSize? = supported.minByOrNull { it.area }
 }
 
 /** 枚举到的摄像头。[isExternal] 是 USB UVC，[sensorOrientationDegrees] 是 `SENSOR_ORIENTATION`。 */
