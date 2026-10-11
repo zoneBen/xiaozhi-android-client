@@ -32,6 +32,16 @@ import android.util.Log
  *
  * 找不到 USB/有线麦时**等一小会儿**（USB 枚举通常几百毫秒到几秒），仍然没有才退到板载麦，
  * 并且**大声记一条警告**——下次再出这种事，日志里第一眼就能看到，不用再从头查。
+ *
+ * ## 例外：内置麦真的能拾音的机型（2026-10-11 TV5701）
+ *
+ * 上面这套"等 USB、退板载、发警告"的前提是**板载通路是聋的**——那是 RK3568 工程样机的
+ * 硬件事实，不是通用规律。TV5701 一体机板上焊了麦克风，把前者原样搬过去会让它永远
+ * 卡在"没有检测到外接麦克风"的自检页上（详见 [DeviceAudioProfile] 的注释）。
+ *
+ * 所以"等不等 USB""要不要报警"现在按机型分叉：机型说内置麦可用，就直接采用内置麦，
+ * 不空等、不报警。外接设备仍然是**优先级更高**的那条路——采集/唤醒循环每帧都会复查
+ * 路由（`findPreferredInputDevice` / `recheckInputDevice`），USB 麦晚到也会自动切过去。
  */
 object InputDeviceSelector {
 
@@ -97,6 +107,9 @@ object InputDeviceSelector {
     /**
      * 选输入设备，**会为 USB 麦短暂等待**。只能在后台线程调用。
      *
+     * 唯一的例外是内置麦本身可用的机型（[DeviceAudioProfile]）：那里不等、也不报警，
+     * 直接采用内置麦。
+     *
      * @param preferBuiltin 设备端 AEC 要求采集与播放落在同一张声卡上，那种模式下必须钉板载麦
      *   （本机 `ECHO_CANCEL_MODE` 是 NONE，所以走的是 false 这条路）。
      * @param waitMs 等待 USB/有线麦出现的上限。**只是想"看一眼当前路由是什么"时传 0**，
@@ -118,6 +131,18 @@ object InputDeviceSelector {
 
         val immediate = preferredExternal(devices, manager)
         if (immediate != null) return immediate
+
+        // 本机内置麦是真能拾音的机型（TV5701 一体机）：直接采用，不空等那两秒。
+        // 等它毫无意义——这台机器不靠 USB 麦也能用，而每次起采都先卡两秒会变成
+        // "叫了它要愣一下才应"。USB 麦真接上时，采集循环每帧复查路由会自动切过去。
+        if (builtin != null && DeviceAudioProfile.supportsBuiltinMic()) {
+            Log.d(
+                TAG,
+                "[CAPTURE] 本机内置麦可用（${builtin.productName}），直接采用；" +
+                    DeviceAudioProfile.describe(),
+            )
+            return builtin
+        }
 
         // 走到这里说明"这一刻"没有 USB/有线麦。它很可能只是还没枚举完 —— 等一会儿再看。
         val startedAt = SystemClock.elapsedRealtime()
@@ -152,22 +177,36 @@ object InputDeviceSelector {
  * 输入设备的健康状态。用于**开机自检**和**常驻提示**。
  *
  * 为什么要单独判"有没有 USB/有线麦"、而不是"有没有任何输入设备"：
- * 这台板子的板载采集通路**没有焊咪头**，它在系统里永远是一个"存在但听不见"的设备，
- * 所以"有输入设备"这个判据会永远为真、什么也发现不了。
- * 产品形态上摄像头麦是标配，因此**它的在位与否才是真正的健康判据**。
+ * RK3568 那台板子的板载采集通路**没有焊咪头**，它在系统里永远是一个"存在但听不见"的
+ * 设备，所以"有输入设备"这个判据会永远为真、什么也发现不了。
+ * 产品形态上摄像头麦是标配，因此在那个硬件上**它的在位与否才是真正的健康判据**。
+ *
+ * 但"板载麦是聋的"是**那台机器的硬件事实**，不是通用规律：TV5701 一体机的内置麦是真的
+ * 能拾音的，拿前一条判据去套它，会把一台好机器报成"坏了"（2026-10-11 实测卡在自检页）。
+ * 所以判据现在是 [canCapture]：外接麦在位，**或者**本机内置麦本身可用。
  */
 data class AudioInputHealth(
     /** USB / 有线麦克风是否在位。 */
     val externalMicPresent: Boolean,
+    /**
+     * 本机内置麦这次检查**确实可用**：机型支持（见 [DeviceAudioProfile]）且系统里真有
+     * `TYPE_BUILTIN_MIC` 设备。两个条件缺一不可——机型说支持但设备不在，照样是听不见。
+     */
+    val builtinMicUsable: Boolean,
     /** 当前实际选中的设备名，给用户看。 */
     val label: String,
-    /** 是否只有板载麦（本机意味着"听不见"）。 */
+    /** 是否只剩板载麦、而本机板载采集通路不可用（这时设备是真的听不见）。 */
     val onlyBuiltin: Boolean,
 ) {
+    /** 这台设备现在**能不能拾音**。开机自检、常驻提示、底栏文案都看它。 */
+    val canCapture: Boolean
+        get() = externalMicPresent || builtinMicUsable
+
     /** 一句话描述，可以直接显示给用户。 */
     val message: String
         get() = when {
             externalMicPresent -> "麦克风：$label"
+            builtinMicUsable -> "麦克风：$label（内置）"
             onlyBuiltin -> "没有检测到外接麦克风，请检查 USB 音频连接"
             else -> "没有检测到任何麦克风"
         }
@@ -180,10 +219,12 @@ fun InputDeviceSelector.health(manager: AudioManager, preferBuiltin: Boolean): A
     val devices = inputsOf(manager)
     val external = preferredExternal(devices, manager)
     val builtin = devices.firstOrNull { it.type == AudioDeviceInfo.TYPE_BUILTIN_MIC }
+    val builtinUsable = builtin != null && DeviceAudioProfile.supportsBuiltinMic()
     val chosen = if (preferBuiltin) builtin ?: external else external ?: builtin
     return AudioInputHealth(
         externalMicPresent = external != null,
+        builtinMicUsable = builtinUsable,
         label = chosen?.productName?.toString().orEmpty().ifBlank { "未知设备" },
-        onlyBuiltin = external == null && builtin != null,
+        onlyBuiltin = external == null && builtin != null && !builtinUsable,
     )
 }

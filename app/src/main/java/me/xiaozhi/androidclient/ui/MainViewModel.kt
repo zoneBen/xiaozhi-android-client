@@ -1095,7 +1095,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             while (true) {
                 val health = runCatching { audioEngine.inputHealth() }.getOrNull()
                 if (health != null) {
-                    val ready = health.externalMicPresent
+                    // 判据是"现在能不能拾音"，不是"有没有外接麦"：TV5701 一体机的内置麦
+                    // 是真能用的，用后者会把它误报成"没有检测到外接麦克风"（2026-10-11）。
+                    val ready = health.canCapture
                     updateState {
                         copy(
                             microphoneReady = ready,
