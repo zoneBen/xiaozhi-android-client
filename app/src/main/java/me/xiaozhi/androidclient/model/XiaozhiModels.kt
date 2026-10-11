@@ -76,6 +76,14 @@ data class ChatMessage(
     val role: ChatRole,
     val text: String,
     val timestamp: String,
+    /**
+     * 这条消息配的本地图片（目前只有摄像头拍照会产生）。null = 纯文字。
+     *
+     * 存**路径**而不是字节：`UiState` 每帧都被 Compose 读，把 `ByteArray` 放进来会让
+     * 每次状态比较去比几万个字节，而且 Coil 本来就是按路径/File 懒加载的。
+     * 文件不存在时界面按纯文字渲染（见 `ChatBubble`），所以路径失效不会崩。
+     */
+    val imagePath: String? = null,
 )
 
 data class ScheduledTaskUi(

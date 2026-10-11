@@ -95,6 +95,7 @@ import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.painterResource
@@ -579,7 +580,10 @@ private fun digitalHumanVideoName(state: UiState): String {
             JSONObject()
                 .put("role", message.role.name)
                 .put("text", message.text)
-                .put("at", message.timestamp),
+                .put("at", message.timestamp)
+                // 带图的照片消息：给出文件路径，好让调试脚本确认"照片真的贴进对话了"，
+                // 以及那个文件确实存在（路径对不对、文件有没有被裁掉）。
+                .put("imagePath", message.imagePath.orEmpty()),
         )
     }
     val tasks = JSONArray()
@@ -2215,6 +2219,11 @@ private fun ChatBubble(
                 )
                 Spacer(modifier = Modifier.width(8.dp))
                 Column {
+                    message.imagePath
+                        ?.takeIf { it.isNotBlank() }
+                        ?.let(::File)
+                        ?.takeIf { it.exists() }
+                        ?.let { photo -> PhotoBubble(photo) }
                     Surface(
                         color = AssistantBubble,
                         shape = RoundedCornerShape(8.dp, 20.dp, 20.dp, 20.dp),
@@ -2235,6 +2244,65 @@ private fun ChatBubble(
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * 对话里的照片气泡：点一下放大到全屏。
+ *
+ * 缩略图限制在 288dp（和文字气泡同宽），因为这台设备屏幕只有 720x1280，
+ * 再大就把对话挤没了。但暗光下的小图根本看不清细节——而"核对"要的正是细节——
+ * 所以点开全屏是必须的，不是锦上添花。
+ */
+@Composable
+private fun PhotoBubble(photo: File) {
+    var expanded by remember { mutableStateOf(false) }
+
+    Surface(
+        color = AssistantBubble,
+        shape = RoundedCornerShape(8.dp, 20.dp, 20.dp, 20.dp),
+        shadowElevation = 1.dp,
+    ) {
+        AsyncImage(
+            model = photo,
+            contentDescription = "小智拍到的照片，点击放大",
+            modifier = Modifier
+                .widthIn(max = 288.dp)
+                .heightIn(max = 288.dp)
+                .clickable { expanded = true },
+            contentScale = ContentScale.Fit,
+        )
+    }
+
+    if (expanded) {
+        Dialog(onDismissRequest = { expanded = false }) {
+            Surface(
+                color = MaterialTheme.colorScheme.surface,
+                shape = RoundedCornerShape(16.dp),
+                shadowElevation = 8.dp,
+            ) {
+                Column(
+                    modifier = Modifier.padding(8.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                ) {
+                    AsyncImage(
+                        model = photo,
+                        contentDescription = "小智拍到的照片",
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .weight(weight = 1f, fill = false)
+                            .clickable { expanded = false },
+                        contentScale = ContentScale.Fit,
+                    )
+                    Text(
+                        text = "点击图片或空白处关闭",
+                        modifier = Modifier.padding(top = 8.dp),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                 }
             }
         }

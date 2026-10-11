@@ -36,6 +36,7 @@ import okhttp3.RequestBody.Companion.toRequestBody
 
 private const val CAMERA_CAPTURE_TIMEOUT_MS = 12_000L
 private const val TAG = "XiaozhiClient"
+private const val PHOTO_DIR = "photos"
 
 /**
  * 上传前把像素**真的转正**，而不是只改 EXIF 方向标签。
@@ -62,6 +63,15 @@ class CameraVisionTool(
     private val okHttpClient: OkHttpClient,
     private val deviceId: () -> String,
     private val clientId: () -> String,
+    /**
+     * 每拍一张就回调一次，带上刚存好的文件，交给界面贴进对话。
+     *
+     * 放在这个类里而不是让各调用方自己贴，是因为拍照有**两个**入口——[McpCameraServer]
+     * 的工具调用、以及监督提醒的定时核验（`runSupervisionVerification`）。用户要的是
+     * "每次拍照后都能在对话里核对"，那就得是拍摄这个动作本身负责回调，而不是靠调用方
+     * 各自记得。默认空实现，单测/无界面的场景不受影响。
+     */
+    private val onPhotoCaptured: (File) -> Unit = {},
 ) {
     @Volatile
     private var visionEndpoint: VisionEndpoint? = null
@@ -80,8 +90,28 @@ class CameraVisionTool(
             "Vision upload endpoint has not been provided by the server"
         }
         val jpeg = captureJpeg()
+        // 先落盘、先贴进对话，再上传。上传失败（网络、云端超时）时用户照样能在对话里
+        // 看到"当时到底拍到了什么"——那正是最需要这张图的时候；反过来先上传的话，
+        // 失败路径上这张图就永远丢了。
+        storePhoto(jpeg)?.let(onPhotoCaptured)
         return uploadForExplanation(endpoint, question, jpeg)
     }
+
+    /**
+     * 把这一张存成独立文件，返回给界面用。
+     *
+     * 存不下就返回 null——**不能因为写文件失败就把拍照整条挂掉**，上传识别才是主流程。
+     */
+    private fun storePhoto(jpeg: ByteArray): File? = runCatching {
+        val dir = context.getExternalFilesDir(PHOTO_DIR) ?: File(context.filesDir, PHOTO_DIR)
+        if (!dir.exists()) dir.mkdirs()
+        val file = File(dir, PhotoStore.photoFileName(System.currentTimeMillis()))
+        file.writeBytes(jpeg)
+        PhotoStore.pruneOldPhotos(dir)
+        file
+    }
+        .onFailure { Log.w(TAG, "[CAMERA] 照片落盘失败，这次的图不会出现在对话里：${it.message}") }
+        .getOrNull()
 
     private suspend fun uploadForExplanation(
         endpoint: VisionEndpoint,

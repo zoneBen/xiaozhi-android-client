@@ -96,6 +96,15 @@ private const val SUPERVISION_START_CODE_PHRASE = "【监督提醒】"
 private const val SUPERVISION_RESULT_CODE_PHRASE = "【监督结果】"
 
 /**
+ * 对话里照片气泡上的说明文字。
+ *
+ * 照片自己不会说话——只有一张图而没有一个字时，用户不知道"这是什么时候拍的、
+ * 为什么拍的"。识别结果会作为**另一条**消息随后出现（走 TTS 那条路），
+ * 所以这里只要一句话交代"这张图是什么"就够了。
+ */
+private const val PHOTO_CAPTION = "📷 我拍到的画面"
+
+/**
  * 监督提醒播报完之后，隔多久调摄像头核验。
  * 要给用户留出实际去做那件事的时间（比如"做十个深蹲"）。
  */
@@ -158,6 +167,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         okHttpClient = okHttpClient,
         deviceId = { activeRoleProfile().deviceId },
         clientId = { activeRoleProfile().clientId },
+        onPhotoCaptured = { file -> addPhotoMessage(file) },
     )
     private var pendingActivationInfo: ActivationInfo? = null
     private var pendingListeningMode: ListeningMode? = null
@@ -168,6 +178,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var goodbyeDisconnectWindowJob: Job? = null
     private var scheduledDeliveryJob: Job? = null
     private var supervisionVerificationJob: Job? = null
+
+    /** 对话消息 id 的自增来源，见 [newMessageId]。 */
+    private val nextMessageId = java.util.concurrent.atomic.AtomicLong(System.currentTimeMillis())
 
     /**
      * 串行化监督核验：同一时刻只允许一次摄像头核验在跑。
@@ -2886,7 +2899,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             } else {
                 copy(
                     chatMessages = (chatMessages + ChatMessage(
-                        id = System.currentTimeMillis(),
+                        id = newMessageId(),
                         role = role,
                         text = trimmed,
                         timestamp = timestamp,
@@ -2895,6 +2908,40 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
     }
+
+    /**
+     * 把刚拍的照片贴进对话，方便用户核对摄像头到底拍到了什么。
+     *
+     * 走独立入口而不是复用 [addChatMessage]，有两个原因：
+     *  - 那个会按"角色 + 文字相同"去重，两次拍到同样内容会被并成一条，图就少一张；
+     *  - 它要求文字非空，而这是一条图片消息。
+     *
+     * 调用方是 [CameraVisionTool] 的 `onPhotoCaptured`，跑在 IO 线程上，
+     * 所以这里只能碰 [updateState]（`MutableStateFlow.update`，跨线程安全）。
+     */
+    private fun addPhotoMessage(file: File) {
+        val timestamp = timestamp()
+        updateState {
+            copy(
+                chatMessages = (chatMessages + ChatMessage(
+                    id = newMessageId(),
+                    role = ChatRole.ASSISTANT,
+                    text = PHOTO_CAPTION,
+                    timestamp = timestamp,
+                    imagePath = file.absolutePath,
+                )).takeLast(100),
+            )
+        }
+        addLog("摄像头拍照已贴到对话里：${file.name}")
+    }
+
+    /**
+     * 消息 id 必须唯一——`ChatMessageList` 用 `key = { it.id }`，撞 id 会让 LazyColumn
+     * 直接抛 `IllegalArgumentException`。原来只用 `System.currentTimeMillis()`，
+     * 同一毫秒内产生两条消息就会撞；现在照片和随后的解说挨得很近，更容易碰。
+     * 所以改成从当前时间起步的自增序列：仍然单调、也仍然近似时间戳，但绝不重复。
+     */
+    private fun newMessageId(): Long = nextMessageId.incrementAndGet()
 
     private fun parseJson(rawText: String): JSONObject? {
         return runCatching { JSONObject(rawText) }.getOrNull()
