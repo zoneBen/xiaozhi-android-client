@@ -3,6 +3,7 @@ package me.xiaozhi.androidclient.mcp
 import me.xiaozhi.androidclient.device.FillLight
 import me.xiaozhi.androidclient.device.PanelHardware
 import me.xiaozhi.androidclient.device.PanelSnapshot
+import me.xiaozhi.androidclient.device.VolumeHardware
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -11,17 +12,17 @@ import org.junit.Test
 /**
  * 工具层：中文语音说出来的话，怎么变成硬件动作，以及**关掉之后真的调不动**。
  *
- * 这里用假的 [PanelHardware]，所以不碰真板子、也不需要 Android 运行时。
+ * 这里用假的 [PanelHardware] / [VolumeHardware]，所以不碰真板子、也不需要 Android 运行时。
  */
 class DeviceToolSetTest {
 
     private val hardware = FakePanelHardware()
-    private val logs = mutableListOf<String>()
+    private val volumeHardware = FakeVolumeHardware()
 
     private fun tools(enabled: Boolean = true) = DeviceToolSet(
         hardware = hardware,
+        volume = volumeHardware,
         enabled = { enabled },
-        log = logs::add,
     )
 
     private fun call(name: String, vararg args: Pair<String, Any>): DeviceToolOutcome {
@@ -64,7 +65,12 @@ class DeviceToolSetTest {
     fun `enabled feature declares the devices this machine actually has`() {
         val names = tools().schemas().map { it.getString("name") }
         assertEquals(
-            listOf(DeviceToolSet.GIMBAL_TOOL, DeviceToolSet.LIGHT_TOOL, DeviceToolSet.STATUS_TOOL),
+            listOf(
+                DeviceToolSet.GIMBAL_TOOL,
+                DeviceToolSet.LIGHT_TOOL,
+                DeviceToolSet.VOLUME_TOOL,
+                DeviceToolSet.STATUS_TOOL,
+            ),
             names,
         )
     }
@@ -73,22 +79,54 @@ class DeviceToolSetTest {
     fun `a machine without a gimbal never declares the gimbal tool`() {
         val lightOnly = DeviceToolSet(
             hardware = FakePanelHardware(gimbalAvailable = false),
+            volume = volumeHardware,
             enabled = { true },
-            log = logs::add,
         )
         val names = lightOnly.schemas().map { it.getString("name") }
-        assertEquals(listOf(DeviceToolSet.LIGHT_TOOL, DeviceToolSet.STATUS_TOOL), names)
+        assertEquals(
+            listOf(DeviceToolSet.LIGHT_TOOL, DeviceToolSet.VOLUME_TOOL, DeviceToolSet.STATUS_TOOL),
+            names,
+        )
     }
 
     @Test
     fun `a machine without lights never declares the light tool`() {
         val gimbalOnly = DeviceToolSet(
             hardware = FakePanelHardware(lightAvailable = false),
+            volume = volumeHardware,
             enabled = { true },
-            log = logs::add,
         )
         val names = gimbalOnly.schemas().map { it.getString("name") }
-        assertEquals(listOf(DeviceToolSet.GIMBAL_TOOL, DeviceToolSet.STATUS_TOOL), names)
+        assertEquals(
+            listOf(DeviceToolSet.GIMBAL_TOOL, DeviceToolSet.VOLUME_TOOL, DeviceToolSet.STATUS_TOOL),
+            names,
+        )
+    }
+
+    @Test
+    fun `volume still works on a machine that has neither gimbal nor lights`() {
+        // 音量是台 Android 设备就有，不该被这台机器没有灯连累。
+        val plain = DeviceToolSet(
+            hardware = FakePanelHardware(gimbalAvailable = false, lightAvailable = false),
+            volume = volumeHardware,
+            enabled = { true },
+        )
+        val names = plain.schemas().map { it.getString("name") }
+        assertEquals(listOf(DeviceToolSet.VOLUME_TOOL, DeviceToolSet.STATUS_TOOL), names)
+    }
+
+    @Test
+    fun `a machine without volume control never declares the volume tool`() {
+        val noVolume = DeviceToolSet(
+            hardware = hardware,
+            volume = FakeVolumeHardware(volumeAvailable = false),
+            enabled = { true },
+        )
+        val names = noVolume.schemas().map { it.getString("name") }
+        assertEquals(
+            listOf(DeviceToolSet.GIMBAL_TOOL, DeviceToolSet.LIGHT_TOOL, DeviceToolSet.STATUS_TOOL),
+            names,
+        )
     }
 
     // ---- 灯光 ----
@@ -138,8 +176,8 @@ class DeviceToolSetTest {
     fun `a write failure is reported instead of pretending success`() {
         val broken = DeviceToolSet(
             hardware = FakePanelHardware(writeSucceeds = false),
+            volume = volumeHardware,
             enabled = { true },
-            log = logs::add,
         )
         val outcome = broken.call(
             DeviceToolSet.LIGHT_TOOL,
@@ -198,16 +236,93 @@ class DeviceToolSetTest {
     fun `no gimbal means the tool fails instead of claiming a turn`() {
         val outcome = DeviceToolSet(
             hardware = FakePanelHardware(gimbalAvailable = false),
+            volume = volumeHardware,
             enabled = { true },
-            log = logs::add,
         ).call(DeviceToolSet.GIMBAL_TOOL, JSONObject().put("direction", "left"))
         assertTrue(failureText(outcome).contains("没有可用的云台"))
+    }
+
+    // ---- 媒体音量 ----
+
+    @Test
+    fun `turning the volume down goes to the hardware as a percent`() {
+        val text = successText(call(DeviceToolSet.VOLUME_TOOL, "volume" to 30))
+        assertEquals(listOf(30), volumeHardware.setCalls)
+        assertEquals("媒体音量已调到 30%。", text)
+    }
+
+    @Test
+    fun `mute is volume zero and the reply keeps the pre-mute level`() {
+        volumeHardware.lastAudibleValue = 40
+        val text = successText(call(DeviceToolSet.VOLUME_TOOL, "volume" to 0))
+        assertEquals(listOf(0), volumeHardware.setCalls)
+        assertTrue(text.contains("静音"))
+        assertTrue(text.contains("静音前是 40%"))
+    }
+
+    @Test
+    fun `the reply reports what the device actually applied`() {
+        // Android 是 15 档，50% 会落到 53%，回复必须说 53 而不是 50。
+        volumeHardware.appliedPercent = 53
+        val text = successText(call(DeviceToolSet.VOLUME_TOOL, "volume" to 50))
+        assertTrue(text.contains("已调到 53%"))
+        assertTrue(text.contains("你要的 50%"))
+    }
+
+    @Test
+    fun `missing volume is rejected instead of defaulting to something`() {
+        val message = failureText(call(DeviceToolSet.VOLUME_TOOL))
+        assertTrue(message.contains("volume"))
+        assertTrue(volumeHardware.setCalls.isEmpty())
+    }
+
+    @Test
+    fun `volume outside 0 to 100 is rejected, not clamped`() {
+        // schema 里写了 0-100，给到 150 是模型自己搞错了；悄悄夹成 100 会把错误盖掉。
+        val tooLoud = failureText(call(DeviceToolSet.VOLUME_TOOL, "volume" to 150))
+        assertTrue(tooLoud.contains("0 到 100"))
+        val negative = failureText(call(DeviceToolSet.VOLUME_TOOL, "volume" to -5))
+        assertTrue(negative.contains("0 到 100"))
+        assertTrue(volumeHardware.setCalls.isEmpty())
+    }
+
+    @Test
+    fun `a volume write failure is reported instead of pretending success`() {
+        val failing = DeviceToolSet(
+            hardware = hardware,
+            volume = FakeVolumeHardware(writeSucceeds = false),
+            enabled = { true },
+        )
+        val outcome = failing.call(DeviceToolSet.VOLUME_TOOL, JSONObject().put("volume", 30))
+        assertTrue(failureText(outcome).contains("音量设置失败"))
+    }
+
+    @Test
+    fun `no volume control means the tool fails instead of claiming a change`() {
+        val outcome = DeviceToolSet(
+            hardware = hardware,
+            volume = FakeVolumeHardware(volumeAvailable = false),
+            enabled = { true },
+        ).call(DeviceToolSet.VOLUME_TOOL, JSONObject().put("volume", 30))
+        assertTrue(failureText(outcome).contains("没有可用的音量控制"))
+    }
+
+    @Test
+    fun `disabled feature refuses the volume tool too`() {
+        val message = failureText(
+            tools(enabled = false).call(
+                DeviceToolSet.VOLUME_TOOL,
+                JSONObject().put("volume", 30),
+            ),
+        )
+        assertTrue(message.contains("已被用户关闭"))
+        assertTrue(volumeHardware.setCalls.isEmpty())
     }
 
     // ---- 状态 ----
 
     @Test
-    fun `status reports the angle and each light`() {
+    fun `status reports the angle, each light and the volume`() {
         hardware.snapshotValue = PanelSnapshot(
             angleDegrees = 45,
             rotating = true,
@@ -215,11 +330,29 @@ class DeviceToolSetTest {
             topLightOn = false,
             infraredOn = null,
         )
+        volumeHardware.currentPercent = 60
         val text = successText(call(DeviceToolSet.STATUS_TOOL))
         assertTrue(text.contains("云台角度 45 度，正在转动"))
         assertTrue(text.contains("下方补光灯：开"))
         assertTrue(text.contains("顶部补光灯：关"))
         assertTrue(text.contains("红外灯：读不到"))
+        assertTrue(text.contains("媒体音量 60%"))
+    }
+
+    @Test
+    fun `status tells the model what to restore when muted`() {
+        // 没有这句，模型只能猜一个 50 出来回答"取消静音"。
+        volumeHardware.currentPercent = 0
+        volumeHardware.lastAudibleValue = 40
+        val text = successText(call(DeviceToolSet.STATUS_TOOL))
+        assertTrue(text.contains("媒体音量 0%（静音，静音前是 40%）"))
+    }
+
+    @Test
+    fun `status says so instead of inventing a number when the volume is unreadable`() {
+        volumeHardware.currentPercent = null
+        val text = successText(call(DeviceToolSet.STATUS_TOOL))
+        assertTrue(text.contains("媒体音量：读不到"))
     }
 
     @Test
@@ -271,4 +404,38 @@ private class FakePanelHardware(
     override fun releaseAll() = Unit
 
     override fun close() = Unit
+}
+
+private class FakeVolumeHardware(
+    override val volumeAvailable: Boolean = true,
+    private val writeSucceeds: Boolean = true,
+) : VolumeHardware {
+
+    /** `setVolumePercent` 收到的百分比。 */
+    val setCalls = mutableListOf<Int>()
+
+    /** 当前音量，null = 读不到。 */
+    var currentPercent: Int? = 50
+
+    /**
+     * 写入后"实际生效"的百分比，默认就是请求值。
+     * 设成别的数用来模拟 15 档取整（请求 50 落到 53）。
+     */
+    var appliedPercent: Int? = null
+
+    /** "静音前是多少"。 */
+    var lastAudibleValue: Int? = null
+
+    override fun setVolumePercent(percent: Int): Int? {
+        setCalls += percent
+        if (!writeSucceeds) return null
+        val applied = appliedPercent ?: percent
+        currentPercent = applied
+        if (applied > 0) lastAudibleValue = applied
+        return applied
+    }
+
+    override fun volumePercent(): Int? = currentPercent
+
+    override fun lastAudiblePercent(): Int? = lastAudibleValue
 }

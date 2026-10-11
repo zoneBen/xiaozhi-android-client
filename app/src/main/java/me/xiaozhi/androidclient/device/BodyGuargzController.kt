@@ -135,12 +135,18 @@ class BodyGuargzController(context: Context) : PanelHardware {
         append("（节点为 false 也可能只是没权限看，不代表硬件不存在）")
     }
 
-    /** 设置页副标题用的一句话。 */
+    /**
+     * 设置页副标题里属于**云台 / 补光灯**的那半句。
+     *
+     * 音量那半句由 [SystemVolumeController.availabilityLabel] 提供，两句在 ViewModel 里拼起来。
+     * 这里不再说"功能已自动停用"——音量是台 Android 设备就有，整体功能不会因为这台机器
+     * 没灯就全停，那句话已经不成立了。
+     */
     fun availabilityLabel(): String = when {
-        gimbalAvailable && lightAvailable -> "本机云台和补光灯都能控制"
-        gimbalAvailable -> "本机只能控制云台，没找到补光灯"
-        lightAvailable -> "本机只能控制补光灯，没找到云台"
-        else -> "本机没找到云台和补光灯，功能已自动停用"
+        gimbalAvailable && lightAvailable -> "云台和补光灯都能控制"
+        gimbalAvailable -> "只能控制云台，没找到补光灯"
+        lightAvailable -> "只能控制补光灯，没找到云台"
+        else -> "没找到云台和补光灯"
     }
 
     override fun setFillLight(light: FillLight, on: Boolean): Boolean {

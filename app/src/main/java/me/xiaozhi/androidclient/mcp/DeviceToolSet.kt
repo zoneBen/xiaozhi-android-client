@@ -4,11 +4,13 @@ import me.xiaozhi.androidclient.device.FillLight
 import me.xiaozhi.androidclient.device.GimbalDirection
 import me.xiaozhi.androidclient.device.PanelAngles
 import me.xiaozhi.androidclient.device.PanelHardware
+import me.xiaozhi.androidclient.device.VolumeHardware
+import me.xiaozhi.androidclient.device.VolumeScale
 import org.json.JSONArray
 import org.json.JSONObject
 
 /**
- * 本地 function call：把"左转""打开灯光"这类话接到 TV5701 的云台上。
+ * 本地 function call：把"左转""打开灯光""声音小一点"这类话接到这台设备的硬件上。
  *
  * ## 它在整条链路上的位置（2026-10-11）
  *
@@ -16,6 +18,12 @@ import org.json.JSONObject
  * `tools/call` 走 WebSocket 里的 MCP，和 ESP32 那边 `main/mcp_server.cc` 是同一套协议）。
  * 这轮要做的不是再搭一遍，而是**多声明几个工具**——用 `self.<子系统>.<动作>` 的命名，
  * 和 ESP32 各板子的 `self.otto.action` / `self.AEC.set_mode` 一个路子。
+ *
+ * ## 两个子系统的差别：谁能被"关掉"
+ *
+ * 云台/补光灯（[PanelHardware]）只在 TV5701 这种板子上有；媒体音量（[VolumeHardware]）
+ * 是台 Android 设备就有。所以非 TV5701 的机器上，开关打开后只会多出音量工具，
+ * 云台和补光灯那两条不会声明——可用性各自探测，不互相拖累。
  *
  * ## 可关闭（用户明确要求）
  *
@@ -26,15 +34,15 @@ import org.json.JSONObject
  * ## 为什么单独一个类、不塞进 [McpCameraServer]
  *
  * 那边负责的是"JSON-RPC 收发 + 回复"，这边负责"中文参数怎么翻译成动作"。
- * 分开之后 [PanelHardware] 换成假的就能单测，不用连真板子。
+ * 分开之后 [PanelHardware] / [VolumeHardware] 换成假的就能单测，不用连真板子。
  */
 class DeviceToolSet(
     private val hardware: PanelHardware,
+    private val volume: VolumeHardware,
     private val enabled: () -> Boolean,
-    private val log: (String) -> Unit,
 ) {
     /** 本工具集认领的工具名。 */
-    val toolNames: Set<String> = setOf(GIMBAL_TOOL, LIGHT_TOOL, STATUS_TOOL)
+    val toolNames: Set<String> = setOf(GIMBAL_TOOL, LIGHT_TOOL, VOLUME_TOOL, STATUS_TOOL)
 
     fun isDeviceTool(name: String): Boolean = name in toolNames
 
@@ -44,7 +52,12 @@ class DeviceToolSet(
         return buildList {
             if (hardware.gimbalAvailable) add(gimbalSchema())
             if (hardware.lightAvailable) add(lightSchema())
-            if (hardware.gimbalAvailable || hardware.lightAvailable) add(statusSchema())
+            if (volume.volumeAvailable) add(volumeSchema())
+            // 状态工具只要有**任何**一样能报的东西就声明：它现在是云台、灯、音量三合一的入口，
+            // 也是模型做"大一点/取消静音"这类相对操作前必须先查的地方。
+            if (hardware.gimbalAvailable || hardware.lightAvailable || volume.volumeAvailable) {
+                add(statusSchema())
+            }
         }
     }
 
@@ -54,11 +67,12 @@ class DeviceToolSet(
         }
         if (!enabled()) {
             // 会话中途关掉的情况：服务端手里还是旧列表，所以这条必须真的拦住。
-            return DeviceToolOutcome.Failure("本机的本地设备控制已被用户关闭，无法操作云台和灯光。")
+            return DeviceToolOutcome.Failure("本机的本地设备控制已被用户关闭，无法操作云台、灯光和音量。")
         }
         return when (name) {
             GIMBAL_TOOL -> callGimbal(args)
             LIGHT_TOOL -> callLight(args)
+            VOLUME_TOOL -> callVolume(args)
             else -> callStatus()
         }
     }
@@ -129,6 +143,40 @@ class DeviceToolSet(
         return DeviceToolOutcome.Success("${target.label}已${on.onOffVerb()}。$suffix")
     }
 
+    private fun callVolume(args: JSONObject): DeviceToolOutcome {
+        if (!volume.volumeAvailable) {
+            return DeviceToolOutcome.Failure("本机没有可用的音量控制。")
+        }
+        if (!args.has("volume") || args.isNull("volume")) {
+            return DeviceToolOutcome.Failure("缺少 volume 参数，请给出 0 到 100 之间的音量。")
+        }
+        // 越界就退回让模型重来，不悄悄夹到 100：schema 里已经写了 0-100，
+        // 给到 150 是模型自己搞错了，夹一下会把错误盖掉。和云台的 degrees 一个处理方式。
+        val requested = args.optInt("volume", -1)
+        if (!VolumeScale.isWithinRange(requested)) {
+            return DeviceToolOutcome.Failure("volume 必须在 0 到 100 之间。")
+        }
+        val actual = volume.setVolumePercent(requested)
+            ?: return DeviceToolOutcome.Failure("音量设置失败，本机的音量可能改不了。")
+        return DeviceToolOutcome.Success(volumeReply(requested, actual))
+    }
+
+    /**
+     * 回复里报的是**实际生效**的音量（[actual]），不是请求值。
+     *
+     * Android 的音量是 15 档左右，所以 50% 常常落到 53%，两个数不一样时明说，
+     * 免得用户按自己说的数字去理解。
+     */
+    private fun volumeReply(requested: Int, actual: Int): String {
+        if (actual > 0) {
+            val note = if (requested == actual) "" else "（你要的 $requested% 在这台机器上落到 $actual%）"
+            return "媒体音量已调到 $actual%。$note"
+        }
+        val restore = volume.lastAudiblePercent()
+        val note = if (restore == null) "" else "，静音前是 $restore%"
+        return "媒体音量已调到 0，也就是静音$note。"
+    }
+
     private fun callStatus(): DeviceToolOutcome {
         val snapshot = hardware.snapshot()
         val parts = mutableListOf<String>()
@@ -141,7 +189,26 @@ class DeviceToolSet(
         parts += "下方补光灯：${snapshot.bottomLightOn.onOffText()}"
         parts += "顶部补光灯：${snapshot.topLightOn.onOffText()}"
         parts += "红外灯：${snapshot.infraredOn.onOffText()}"
+        parts += volumeStatusText()
         return DeviceToolOutcome.Success(parts.joinToString("；") + "。")
+    }
+
+    /**
+     * 音量的状态文字。
+     *
+     * 静音时把"静音前是多少"一起报出去——这是模型能回答"取消静音"的唯一依据，
+     * 不给它就只能猜一个 50 出来。
+     */
+    private fun volumeStatusText(): String {
+        if (!volume.volumeAvailable) return "媒体音量：调不了"
+        val current = volume.volumePercent() ?: return "媒体音量：读不到"
+        if (current > 0) return "媒体音量 $current%"
+        val restore = volume.lastAudiblePercent()
+        return if (restore == null) {
+            "媒体音量 0%（静音）"
+        } else {
+            "媒体音量 0%（静音，静音前是 $restore%）"
+        }
     }
 
     private fun gimbalSchema() = JSONObject()
@@ -208,12 +275,52 @@ class DeviceToolSet(
                 .put("required", JSONArray().put("target").put("on")),
         )
 
+    /**
+     * 音量工具。
+     *
+     * 名字和参数形状**故意**和 `xiaozhi-esp32` 的 `main/mcp_server.cc` 一模一样
+     * （`self.audio_speaker.set_volume`、`volume` 0-100），那边就是这么加的：
+     * 服务端的提示词和模型对这套接口的熟悉度可以直接复用。
+     *
+     * 相对说法（"大一点"）和"取消静音"都必须先查 [STATUS_TOOL]——单条
+     * `set_volume` 是绝对值接口，模型不知道当前值就只能瞎设。所以描述里把这两条写死。
+     */
+    private fun volumeSchema() = JSONObject()
+        .put("name", VOLUME_TOOL)
+        .put(
+            "description",
+            "设置这台设备播放媒体的音量，也就是小智自己说话的音量。" +
+                "用户说「音量调到 50」「声音大一点」「小声一点」「静音」时调用。" +
+                "volume 是 0 到 100 的整数，0 就是静音。" +
+                "用户说相对的话（「大一点」「小一点」「太吵了」）时，" +
+                "先调用 $STATUS_TOOL 看当前音量，再加或减 20 再调用本工具。" +
+                "用户说「取消静音」「恢复音量」时，先调用 $STATUS_TOOL 看里面的" +
+                "「静音前是 N%」，再把 volume 设回那个值。",
+        )
+        .put(
+            "inputSchema",
+            JSONObject()
+                .put("type", "object")
+                .put(
+                    "properties",
+                    JSONObject().put(
+                        "volume",
+                        JSONObject()
+                            .put("type", "integer")
+                            .put("minimum", VolumeScale.MIN)
+                            .put("maximum", VolumeScale.MAX),
+                    ),
+                )
+                .put("required", JSONArray().put("volume")),
+        )
+
     private fun statusSchema() = JSONObject()
         .put("name", STATUS_TOOL)
         .put(
             "description",
-            "查询这台设备的硬件状态：云台现在在多少度、有没有在转，两盏补光灯和红外灯是开还是关。" +
-                "用户问「云台现在朝哪」「灯开着吗」时调用。",
+            "查询这台设备的硬件状态：云台现在在多少度、有没有在转，两盏补光灯和红外灯是开还是关，" +
+                "以及当前媒体音量。用户问「云台现在朝哪」「灯开着吗」「现在音量多少」时调用，" +
+                "也是调整音量和取消静音之前的必要一步。",
         )
         .put(
             "inputSchema",
@@ -223,6 +330,9 @@ class DeviceToolSet(
     companion object {
         const val GIMBAL_TOOL = "self.device.gimbal"
         const val LIGHT_TOOL = "self.device.light"
+
+        /** 和 ESP32 同名同参数，便于复用服务端提示词。 */
+        const val VOLUME_TOOL = "self.audio_speaker.set_volume"
         const val STATUS_TOOL = "self.device.status"
     }
 }

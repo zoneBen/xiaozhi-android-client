@@ -28,6 +28,7 @@ import me.xiaozhi.androidclient.data.AppPreferences
 import me.xiaozhi.androidclient.data.RoleProfileRepository
 import me.xiaozhi.androidclient.data.StoredConfig
 import me.xiaozhi.androidclient.device.BodyGuargzController
+import me.xiaozhi.androidclient.device.SystemVolumeController
 import me.xiaozhi.androidclient.util.ImageSampling
 import me.xiaozhi.androidclient.integration.TermuxCommandEvents
 import me.xiaozhi.androidclient.integration.TermuxCommandResult
@@ -241,10 +242,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      */
     private val bodyGuargzController = BodyGuargzController(application)
 
+    /**
+     * 媒体音量。这是**任何 Android 设备都有**的能力，和云台/补光灯不一样，
+     * 所以不跟着 TV5701 的探测走，构造完就能用。
+     */
+    private val systemVolumeController = SystemVolumeController(application)
+
     private val deviceToolSet = DeviceToolSet(
         hardware = bodyGuargzController,
+        volume = systemVolumeController,
         enabled = { uiState.value.deviceControlEnabled },
-        log = ::addLog,
     )
 
     private val mcpCameraServer = McpCameraServer(
@@ -287,7 +294,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         // 云台/补光灯的可用性只能靠反射探测，结果写进日志和设置页。
         // 这台机器上到底认没认出来，是这一版最需要真机确认的一件事。
         addLog("本地设备控制：${bodyGuargzController.describe()}")
-        updateState { copy(deviceControlStatus = bodyGuargzController.availabilityLabel()) }
+        addLog("媒体音量：${systemVolumeController.availabilityLabel()}，当前 ${systemVolumeController.volumePercent() ?: "读不到"}%")
+        updateState {
+            copy(
+                deviceControlStatus = listOf(
+                    bodyGuargzController.availabilityLabel(),
+                    systemVolumeController.availabilityLabel(),
+                ).joinToString("，"),
+            )
+        }
         nanoSerialBridge.start()
         reminderScheduler.start()
         viewModelScope.launch {
@@ -1072,11 +1087,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (!enabled) {
             bodyGuargzController.releaseAll()
         }
+        // 音量**故意**不跟着复位：灯亮着、云台转着没人管是真的收不了场（关掉之后语音通道
+        // 就没了），但音量用户随时可以用音量键或遥控器改，没有"停不下来"的问题；
+        // 关个开关就把音量改掉反而是替用户做了他没要求的事。
         addLog(
             if (enabled) {
-                "已开启本地设备控制（云台、补光灯），下次声明工具时生效"
+                "已开启本地设备控制（云台、补光灯、媒体音量），下次声明工具时生效"
             } else {
-                "已关闭本地设备控制，并已关闭补光灯、红外灯和云台转动"
+                "已关闭本地设备控制。已关闭补光灯、红外灯并停住云台；音量保持不变"
             },
         )
     }

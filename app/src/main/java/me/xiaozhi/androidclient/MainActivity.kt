@@ -1544,7 +1544,7 @@ private fun DeviceControlCard(
         SettingsSwitch(
             icon = "🎥",
             title = "本地设备控制",
-            subtitle = "允许小智用语音控制摄像头云台和补光灯，比如「左转」「打开灯光」。关掉后这些指令不再下发给设备。",
+            subtitle = "允许小智用语音控制摄像头云台、补光灯和媒体音量，比如「左转」「打开灯光」「声音小一点」。关掉后这些指令不再下发给设备。",
             checked = state.deviceControlEnabled,
             onCheckedChange = onDeviceControlEnabledChanged,
         )
@@ -1552,7 +1552,7 @@ private fun DeviceControlCard(
         SettingsStatus(
             icon = if (state.deviceControlEnabled) "🔧" else "🚫",
             title = if (state.deviceControlEnabled) "本机硬件自检" else "本机硬件自检（功能已关闭）",
-            subtitle = state.deviceControlStatus.ifBlank { "正在检测本机的云台和补光灯…" },
+            subtitle = state.deviceControlStatus.ifBlank { "正在检测本机的云台、补光灯和音量…" },
         )
     }
 }
