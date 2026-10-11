@@ -1,3 +1,5 @@
 <resources>
-    <string name="app_name">小智AI</string>
+    <!-- 桌面图标下面显示的名字。只用在 AndroidManifest 的 android:label 上，
+         应用内的自称仍是「小智」（唤醒词、对话里的角色名都不受影响）。 -->
+    <string name="app_name">语音助手</string>
 </resources>
