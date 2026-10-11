@@ -9,8 +9,6 @@ import android.media.MediaPlayer
 import android.view.Gravity
 import android.view.ViewGroup
 import android.widget.FrameLayout
-import android.net.Uri
-import android.widget.VideoView
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import androidx.activity.ComponentActivity
@@ -178,16 +176,7 @@ private const val STARTUP_OVERLAY_TIMEOUT_MS = 25_000L
 private const val STARTUP_OVERLAY_MIN_MS = 2_500L
 
 /**
- * 开机动画的兜底时限。素材本身 6.04 秒，这里给到 9 秒。
- *
- * **这不是可有可无的保险**：动画是自检通过后进主界面的唯一通道，
- * 一旦解码失败、`onCompletion` 不回调（实测视频解码在低配上确实会这样），
- * 没有这个兜底用户就会永远停在开机画面上——比不放动画严重得多。
- */
-private const val BOOT_ANIMATION_TIMEOUT_MS = 9_000L
-
-/**
- * 开机动画播完后，遮罩再多留这么久才撤。
+ * 自检通过后，遮罩再多留这么久才撤。
  *
  * **这不是为了好看，是为了不黑屏。** 实测时间线（加了日志之后）：
  *
@@ -197,8 +186,8 @@ private const val BOOT_ANIMATION_TIMEOUT_MS = 9_000L
  * 06:11:30.525  [数字人] 首帧渲染
  * ```
  *
- * 那 327ms 里窗口是空的，整屏黑。多留一段时间让主界面在遮罩后面把首帧画完，撤掉时就已经有内容了。
- * 取值按实测 0.9 秒的总落差留了余量。
+ * 那 327ms 里窗口是空的，整屏黑。所以自检一通过就放行主界面去组合，遮罩在后面多留一段，
+ * 等它把首帧画完再撤——撤掉时就已经有内容了。取值按实测 0.9 秒的总落差留了余量。
  */
 private const val BOOT_COVER_LINGER_MS = 1_200L
 
@@ -687,19 +676,18 @@ private fun XiaozhiScreen(
 
     val showStartupOverlay = !startupOverlayDismissed && !checksPassed
 
-    // 开机动画：自检通过那一刻起播一次，播完（或超时/解码失败）才让位给主界面。
-    // 用户点过「仍然继续」时跳过——那表示他已经知道有问题、只想快点用。
-    var bootAnimationDone by rememberSaveable { mutableStateOf(false) }
-    // 视频播完 ≠ 可以撤遮罩。撤早了会露出一段黑屏，原因见 BOOT_COVER_LINGER_MS。
+    // 自检通过后不再播那段「瓶中星」开机动画了——用户反馈那一屏跟数字人主界面是两套视觉
+    // 语言，切过去很突兀。但这 1.2 秒的同色遮罩必须留着，原因见 BOOT_COVER_LINGER_MS。
+    //
+    // 用户点过「仍然继续」时不再等：那表示他已经知道有问题、只想快点用。
     var bootCoverReleased by remember { mutableStateOf(false) }
-    LaunchedEffect(bootAnimationDone) {
-        if (bootAnimationDone) {
+    LaunchedEffect(checksPassed, startupOverlayDismissed) {
+        if (checksPassed && !startupOverlayDismissed) {
             delay(BOOT_COVER_LINGER_MS)
             bootCoverReleased = true
         }
     }
-    val showBootAnimation =
-        !startupOverlayDismissed && checksPassed && !bootCoverReleased
+    val showBootCover = checksPassed && !startupOverlayDismissed && !bootCoverReleased
 
     Scaffold(
         containerColor = if (currentScreen == AppScreen.SETTINGS) SettingsBackground else ChatBackground,
@@ -733,12 +721,10 @@ private fun XiaozhiScreen(
             // 唯一可靠的做法是**让那个 surface 在启动期间根本不存在**，
             // 也就是把主界面从组合里去掉。
             //
-            // 注意后半段 `&& !bootAnimationDone`：动画**播完**之后就要让主界面开始组合，
-            // 哪怕遮罩还盖着（遮罩会多留 BOOT_COVER_LINGER_MS）。这样主界面能在这段时间里
-            // 把首帧画出来，撤遮罩时才不会露出空窗口。
-            val startupCoverVisible =
-                showStartupOverlay || (showBootAnimation && !bootAnimationDone)
-            if (!startupCoverVisible) {
+            // 注意是 `!showStartupOverlay` 而不是「遮罩是否还看得见」：自检一通过就要放行，
+            // 让主界面在后面那层同色遮罩**盖着**的时候把首帧画出来。等遮罩自己撤掉才组合，
+            // 就正好退回到上面那段实测的 327ms 空窗。
+            if (!showStartupOverlay) {
                 when (currentScreen) {
                     AppScreen.CHAT -> ChatScreen(
                         state = state,
@@ -783,10 +769,10 @@ private fun XiaozhiScreen(
                 )
             }
 
-            // 自检全过、马上进主界面：播一次开机动画。
-            // 这台设备是开机自启的，所以每次开机都会看到，属于产品仪式感的一部分。
-            if (showBootAnimation) {
-                BootAnimationOverlay(onFinished = { bootAnimationDone = true })
+            // 自检全过之后，用一层同色实底盖住主界面把首帧画完的那段时间。
+            // 这层不再是「开机动画」了，只负责遮，不负责演。
+            if (showBootCover) {
+                StartupCover()
             }
         }
     }
@@ -865,107 +851,40 @@ private fun StartupLoadingOverlay(state: UiState, onContinueAnyway: (() -> Unit)
 }
 
 /**
- * 开机动画：自检全部通过、马上要进主界面时播一次。
+ * 启动遮罩：一块和主界面同色的实底，盖到主界面首帧画出来为止。
  *
- * 素材是「一个空瓶 → 星星从右上带光尾飞入 → 穿过瓶盖落入瓶中 → 在瓶底驻留发光」
- * （`res/raw/boot_animation.mp4`，720x1280，6.04 秒，已去音轨）。
+ * ## 为什么是一个真 View，而不是 Compose 的 Box + background
  *
- * ## 为什么整层是一个真 View，而不是 Compose 的 Box + background
+ * 这是实测踩出来的：数字人是 VideoView，而 VideoView 内部是 **SurfaceView**——
+ * 它在 SurfaceFlinger 里是**独立的合成层**，不参与普通 View 树的绘制。所以无论给这层用
+ * Compose 的 `Modifier.background()` 还是真 View 的底色，**都盖不住它**。
  *
- * 这是实测踩出来的：`AndroidView` 里承载视频的是**真 Android View**，
- * 它的绘制层级在 Compose 画布**之上**。所以用 `Modifier.background()` 给这层画背景
- * **盖不住**数字人的 VideoView，现象有两个，用户原话是「很拙劣」：
+ * 实测那一闪的截图（800 宽，逐列与背景色 #F1F5FA 的偏差）：
+ *     x0~30   : 0        ← 被我们盖住了
+ *     x40~760 : 233~250  ← 数字人，720px 正好是视频宽度
+ *     x760~799: 0        ← 被我们盖住了
+ * 用户的原话是「先闪一帧让你看到了，然后再马上遮住，这个很拙劣」。
  *
- *   1. 自检结束时先闪一帧数字人，动画才盖上来；
- *   2. 视频是 9:16 而屏幕是 800x1280，两侧各留 40px，那两条边里**一直能看到数字人在闪**。
+ * 所以底色用**真 View（FrameLayout）自带的不透明背景**：它和数字人在同一绘制层，
+ * 且是在数字人之后创建的，盖得住。Compose 这边只负责摆放，不负责遮。
  *
- * 实测数据（动画播放中截图，左右各 40px 边带与 `#F1F5FA` 的最大偏差）：
- * 启动窗口 0、自检中 0、**动画播放 250** —— 250 就是数字人的画面透出来了。
- * 自检那会儿之所以干净，只是因为当时数字人还没加载完，属于运气好。
+ * ## 这层以前还兼职演一段动画
  *
- * 修法：底色改用**真 View（FrameLayout）自带的不透明背景**。它和数字人在同一绘制层，
- * 且是在数字人之后创建的，所以盖得住。Compose 这边只负责摆放，不负责遮。
+ * 原先这里是 `BootAnimationOverlay`，会在自检通过后播一段 6.04 秒的「瓶中星」视频
+ * （`res/raw/boot_animation.mp4`）。用户反馈那一屏很突兀——瓶子星星和数字人主界面
+ * 是两套完全不同的视觉语言，切过去像换了个 App。已去掉：遮罩保留，动画不再播，
+ * 素材和 `launch_logo` 也一并从包里移除。
  */
 @Composable
-private fun BootAnimationOverlay(onFinished: () -> Unit) {
-    // 用 rememberUpdatedState 而不是直接把 onFinished 捕进 LaunchedEffect：
-    // 后者会把协程绑死在首次组合时的那个 lambda 上，重组后仍调用旧闭包。
-    val finished by rememberUpdatedState(onFinished)
-    var done by remember { mutableStateOf(false) }
-
+private fun StartupCover() {
     AndroidView(
         modifier = Modifier.fillMaxSize(),
         factory = { context ->
             FrameLayout(context).apply {
-                // 底色取自 launch_background（#F1F5FA）。启动窗口、这层、视频自身的背景
-                // 三者同色，所以两侧留边看不出来。用资源而不是写字面量，改色时会跟着走。
                 setBackgroundColor(context.getColor(R.color.launch_background))
-
-                val video = VideoView(context)
-                addView(
-                    video,
-                    FrameLayout.LayoutParams(
-                        ViewGroup.LayoutParams.MATCH_PARENT,
-                        ViewGroup.LayoutParams.MATCH_PARENT,
-                        Gravity.CENTER,
-                    ),
-                )
-
-                // 按原比例居中「适配」（fit），不是铺满裁切——瓶子在画面正中，裁切会切到瓶子。
-                // 尺寸要等容器量完 + 视频解码拿到宽高之后才能算，两边谁后到都要重算一次。
-                var aspect = 0f
-                fun fitToScreen() {
-                    if (aspect <= 0f || width <= 0 || height <= 0) return
-                    val (w, h) = if (width.toFloat() / height > aspect) {
-                        (height * aspect).toInt() to height
-                    } else {
-                        width to (width / aspect).toInt()
-                    }
-                    video.layoutParams = FrameLayout.LayoutParams(w, h, Gravity.CENTER)
-                }
-                addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> fitToScreen() }
-
-                video.setOnPreparedListener { player ->
-                    android.util.Log.d("XiaozhiClient", "[开机动画] 开始播放")
-                    player.isLooping = false
-                    // 必须静音：素材已经去过音轨，这里再设一次是防呆——
-                    // 换成带声音的素材时不会突然在开机时放出一声响。
-                    player.setVolume(0f, 0f)
-                    if (player.videoHeight > 0) {
-                        aspect = player.videoWidth.toFloat() / player.videoHeight
-                    }
-                    fitToScreen()
-                    video.start()
-                }
-                video.setOnCompletionListener {
-                    android.util.Log.d("XiaozhiClient", "[开机动画] 播放结束")
-                    if (!done) {
-                        done = true
-                        finished()
-                    }
-                }
-                video.setOnErrorListener { _, _, _ ->
-                    // 解码失败也要放行，否则卡死在开机画面。
-                    if (!done) {
-                        done = true
-                        finished()
-                    }
-                    true
-                }
-                video.setVideoURI(
-                    Uri.parse("android.resource://${context.packageName}/${R.raw.boot_animation}")
-                )
             }
         },
     )
-
-    LaunchedEffect(Unit) {
-        delay(BOOT_ANIMATION_TIMEOUT_MS)
-        if (!done) {
-            done = true
-            finished()
-        }
-    }
 }
 
 @Composable

@@ -1,8 +1,11 @@
 <resources>
     <style name="Theme.XiaozhiAndroidClient" parent="Theme.Material3.DayNight.NoActionBar">
-        <!-- 冷启动到 Compose 首帧之间约 4~5 秒，用一个明确的品牌启动底图填住，
-             避免用户把空窗当成死机。 -->
-        <item name="android:windowBackground">@drawable/launch_screen</item>
+        <!-- 冷启动到 Compose 首帧之间约 4~5 秒，要填住，否则用户把空窗当成死机。
+             这里只给一个和主界面同色的实底（#F1F5FA，与 ChatBackground 一致），
+             不再放瓶子 logo：原来那张 `launch_logo` 会和开机动画里的同一个标记
+             连着出现两次，用户反馈很突兀，已一并去掉。纯色还有个好处——
+             从系统窗口到 Compose 首帧全程同色，看不到任何跳变。 -->
+        <item name="android:windowBackground">@color/launch_background</item>
         <item name="android:windowLightStatusBar">true</item>
     </style>
 </resources>
