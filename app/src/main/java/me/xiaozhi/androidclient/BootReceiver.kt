@@ -16,7 +16,9 @@ class BootReceiver : BroadcastReceiver() {
         Thread({
             try {
                 SystemClock.sleep(BOOT_START_DELAY_MS)
-                val launchIntent = Intent(context, MainActivity::class.java).apply {
+                // 走 SplashActivity 而不是直接拉 MainActivity：开机时主进程要现场校验
+                // 字节码，冷启动有 8~9 秒，头屏得顶在上面。详见 SplashActivity.kt。
+                val launchIntent = Intent(context, SplashActivity::class.java).apply {
                     addFlags(
                         Intent.FLAG_ACTIVITY_NEW_TASK or
                             Intent.FLAG_ACTIVITY_CLEAR_TOP or

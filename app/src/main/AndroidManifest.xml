@@ -39,11 +39,17 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.XiaozhiAndroidClient"
         android:usesCleartextTraffic="true">
+        <!-- 头屏。是 LAUNCHER + HOME，也是开机后的第一屏，冷启动那 8~9 秒靠它顶着。
+             单独一个进程（:splash）是关键：那 8~9 秒是主进程主线程在跑 ART 字节码校验，
+             同进程的话动画会被一起冻住。详见 SplashActivity.kt 里的注释。 -->
         <activity
-            android:name=".MainActivity"
+            android:name=".SplashActivity"
+            android:configChanges="orientation|screenSize|keyboardHidden"
             android:exported="true"
             android:launchMode="singleTask"
+            android:process=":splash"
             android:showWhenLocked="true"
+            android:theme="@style/Theme.Xiaozhi.Splash"
             android:turnScreenOn="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
@@ -55,6 +61,16 @@
                 <category android:name="android.intent.category.DEFAULT" />
             </intent-filter>
         </activity>
+
+        <!-- 主界面。不再挂 LAUNCHER/HOME——入口统一走 SplashActivity，
+             否则 HOME 那条路径会绕过动画。仍然 exported，方便调试脚本和
+             BootReceiver 用显式组件名直接拉起。 -->
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:launchMode="singleTask"
+            android:showWhenLocked="true"
+            android:turnScreenOn="true" />
         <receiver
             android:name=".BootReceiver"
             android:enabled="true"

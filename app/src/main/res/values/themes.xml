@@ -1,11 +1,34 @@
 <resources>
     <style name="Theme.XiaozhiAndroidClient" parent="Theme.Material3.DayNight.NoActionBar">
-        <!-- 冷启动到 Compose 首帧之间约 4~5 秒，要填住，否则用户把空窗当成死机。
-             这里只给一个和主界面同色的实底（#F1F5FA，与 ChatBackground 一致），
-             不再放瓶子 logo：原来那张 `launch_logo` 会和开机动画里的同一个标记
-             连着出现两次，用户反馈很突兀，已一并去掉。纯色还有个好处——
-             从系统窗口到 Compose 首帧全程同色，看不到任何跳变。 -->
-        <item name="android:windowBackground">@color/launch_background</item>
+        <!-- 冷启动到 Compose 首帧之间有 8~9 秒（原因见 app/build.gradle.kts 里
+             dex 校验那段注释）。这段时间屏幕上只有系统启动窗口这一层。
+             实测这台 TV5701（Android 9 / MTK 固件）的启动窗口只画一次快照，
+             animation-list 挂在这里会冻在第一帧——真正的动画在 SplashActivity
+             （独立进程 + 自己的 View，帧循环才跑得起来），这里只做静态兜底。
+             底色与主界面同为 #F1F5FA，从启动窗口切到 Compose 首帧看不到跳变。 -->
+        <item name="android:windowBackground">@drawable/splash_animation</item>
         <item name="android:windowLightStatusBar">true</item>
+        <!-- 不写这行状态栏会跟着 Material3 的 colorPrimary 变成紫色，
+             冷启动那几秒顶上会挂一条紫色栏杆，和浅色界面完全不搭。 -->
+        <item name="android:statusBarColor">@color/launch_background</item>
+        <!-- 关键：不要让系统给 MainActivity 再画一层「启动窗口」。
+             头屏 SplashActivity 会先把 MainActivity 拉起来并行预热，系统一看
+             新 Activity 要出来，就顺手给 MainActivity 画了张预览窗口盖在最上面——
+             它用的是 windowBackground 那张静态图，把下面正在播动画的头屏整个盖住
+             并置为 hidden（实测 dumpsys：SplashActivity 的 Surface shown=false、
+             mLastHidden=true，图层列表里只剩这张静态预览）。
+             关掉预览，头屏才能在主界面真正画出来之前一直看得见、一直在动。 -->
+        <item name="android:windowDisablePreview">true</item>
+    </style>
+
+    <style name="Theme.Xiaozhi.Splash" parent="@android:style/Theme.Material.Light.NoActionBar">
+        <!-- 头屏用平台主题而不是 Material3：SplashActivity 继承的是 platform Activity
+             （不用 AndroidX，进程起得更轻），配 AppCompat/Material 主题有兼容风险，
+             平台主题还省掉一堆没必要的类加载。 -->
+        <item name="android:windowBackground">@drawable/splash_animation</item>
+        <item name="android:colorBackground">@color/launch_background</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:statusBarColor">@color/launch_background</item>
+        <item name="android:navigationBarColor">@color/launch_background</item>
     </style>
 </resources>

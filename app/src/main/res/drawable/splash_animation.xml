@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  系统「启动窗口」的背景（SplashActivity 的 windowBackground，以及直接拉起
+  MainActivity 时的兜底图）。
+
+  它的作用只剩兜住最早那几百毫秒，等 SplashActivity 自己的 View 画出来就换人了。
+  实测这台 TV5701（Android 9，MTK 固件）的启动窗口**只画一次快照**：
+  把 animation-list 挂在这里，十帧截屏像素完全一致，冻在第一帧上——
+  系统那次绘制没有走到 AnimationDrawable 需要的 setVisible(true)，
+  所以这层只能当静态图用，真正的动画交给 SplashActivity。详见 SplashActivity.kt。
+
+  为什么要用 layer-list 包一层：启动窗口是整个屏幕（本机横屏 1280x720），
+  而帧素材是正方形的。animation-list 的每个 item 会被 FILL 拉满整屏，
+  圆环会拉成椭圆；垫一层 gravity="center" 就能按原比例居中，
+  底色由底下那个纯色 item 铺满（与主界面同为 #F1F5FA，切换时看不到跳变）。
+-->
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:drawable="@color/launch_background" />
+
+    <item
+        android:drawable="@drawable/splash_frames"
+        android:gravity="center" />
+</layer-list>

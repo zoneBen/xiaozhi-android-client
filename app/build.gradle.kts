@@ -87,7 +87,18 @@ dependencies {
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.ui:ui-tooling-preview")
     implementation("androidx.compose.foundation:foundation")
-    implementation("androidx.compose.material:material-icons-extended")
+    implementation("androidx.compose.material:material-icons-core")
+    // 注意：**不要**加回 material-icons-extended。
+    //
+    // 那个 AAR 有 35 MB —— 它把全部约一万个图标都编进 dex，而本项目一共只用过其中 2 个
+    // （Timer 和 Visibility，现已改成自带的矢量 XML，见 res/drawable/ic_timer.xml）。
+    // 实测后果（TV5701，32 位 Android 9）：debug 包光 classes.dex 就有 43 MB，
+    // 而该机没做过 dexopt，ART 每次冷启动都要现场校验这堆字节码——
+    // `am start -W` 量到 WaitTime 10179ms；手动 `cmd package compile -m speed` 之后
+    // 掉到 2744ms。开机那 10 秒白屏基本全是它。
+    //
+    // 用到的另外 4 个图标（ArrowBack / Close / PlayArrow / Settings）都在 icons-core 里，
+    // 这个小包继续留着。
     implementation("androidx.compose.material3:material3")
     implementation("com.google.android.material:material:1.12.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")

@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  头屏（SplashActivity）的画面。
+  尺寸写死 220dp 而不是 match_parent：ImageView 的 fitCenter 在缩小之外也会放大，
+  铺满全屏的话这个 220dp 的方图会被撑到整个屏幕高度，气泡大得离谱。
+  正方形 + fitCenter 保证任何屏幕比例下圆环都不会变成椭圆。
+-->
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@color/launch_background">
+
+    <ImageView
+        android:id="@+id/splash_image"
+        android:layout_width="220dp"
+        android:layout_height="220dp"
+        android:layout_gravity="center"
+        android:contentDescription="@string/splash_image_description"
+        android:scaleType="fitCenter"
+        android:src="@drawable/splash_frames" />
+
+</FrameLayout>

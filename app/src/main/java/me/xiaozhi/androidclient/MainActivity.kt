@@ -2,15 +2,18 @@ package me.xiaozhi.androidclient
 
 import android.Manifest
 import android.content.pm.PackageManager
+import android.content.Intent
 import android.os.Bundle
 import java.io.File
 import android.os.Build
 import android.media.MediaPlayer
 import android.view.Gravity
 import android.view.ViewGroup
+import android.view.ViewTreeObserver
 import android.widget.FrameLayout
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.drawable.ColorDrawable
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -54,8 +57,6 @@ import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material.icons.filled.Timer
-import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -232,6 +233,31 @@ class MainActivity : ComponentActivity() {
             setTurnScreenOn(true)
         }
         enableEdgeToEdge()
+        // 主题里的 windowBackground 是一张会循环播放的 animation-list，只在
+        // 「系统启动窗口」那段时间需要它。窗口背景是挂在 DecorView 上、一直在
+        // Compose 底下铺着的，不换掉的话它会每 165ms 让整屏重绘一次，一直到退出。
+        // 换成同色纯色不影响观感，也顺手把 AnimationDrawable 停掉
+        // （View.setBackgroundDrawable 会对旧 drawable 调 setVisible(false)，
+        //   AnimationDrawable 正是靠 setVisible 回调 start/stop 的）。
+        window?.setBackgroundDrawable(
+            ColorDrawable(getColor(R.color.launch_background)),
+        )
+
+        // 首帧真正画出来之后再让头屏让位。用 OnPreDrawListener 而不是 post{}：
+        // post 只是排进消息队列，可能跑在第一帧绘制之前，那样头屏会提前收起，
+        // 中间闪一下空窗。SplashActivity 收到这个广播才 finish。
+        window.decorView.viewTreeObserver.addOnPreDrawListener(
+            object : ViewTreeObserver.OnPreDrawListener {
+                override fun onPreDraw(): Boolean {
+                    window.decorView.viewTreeObserver.removeOnPreDrawListener(this)
+                    sendBroadcast(
+                        Intent(SplashActivity.ACTION_MAIN_DRAWN).setPackage(packageName),
+                    )
+                    return true
+                }
+            },
+        )
+
         setContent {
             XiaozhiClientTheme {
                 val baseDensity = LocalDensity.current
@@ -1353,7 +1379,9 @@ private fun CurrentTaskRow(task: ScheduledTaskUi) {
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Icon(
-            imageVector = if (task.kind == "监督提醒") Icons.Default.Visibility else Icons.Default.Timer,
+            painter = painterResource(
+                if (task.kind == "监督提醒") R.drawable.ic_visibility else R.drawable.ic_timer,
+            ),
             contentDescription = null,
             tint = if (task.kind == "监督提醒") Color(0xFFB45309) else Color(0xFF2563EB),
             modifier = Modifier.size(20.dp),

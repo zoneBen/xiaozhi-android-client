@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Material Icons「timer」的官方路径数据（Apache-2.0）。
+
+  为什么要自己带一份：原来这两个图标（本文件和 ic_visibility.xml）来自
+  `androidx.compose.material:material-icons-extended`，而那个 AAR 有 **35 MB**
+  —— 它把全部约一万个图标都编进 dex，而本项目一共只用了其中 2 个。
+  实测后果见 app/build.gradle.kts 里删掉该依赖时的注释：debug 包的 classes.dex
+  有 43 MB，ART 每次冷启动都要现场校验，开机白屏 10 秒。
+
+  另外 4 个图标（ArrowBack / Close / PlayArrow / Settings）在 material-icons-core 里，
+  那个包很小，继续用 Icons.Default.* 就行。
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <path
+        android:fillColor="#FF000000"
+        android:pathData="M15,1H9v2h6V1zM11,14h2V8h-2v6zM19.03,7.39l1.42,-1.42c-0.43,-0.51 -0.9,-0.99 -1.41,-1.41l-1.42,1.42C16.07,4.74 14.12,4 12,4c-4.97,0 -9,4.03 -9,9s4.02,9 9,9 9,-4.03 9,-9c0,-2.12 -0.74,-4.07 -1.97,-5.61zM12,20c-3.87,0 -7,-3.13 -7,-7s3.13,-7 7,-7 7,3.13 7,7 -3.13,7 -7,7z" />
+</vector>
