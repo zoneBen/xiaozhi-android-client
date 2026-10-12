@@ -578,6 +578,7 @@ private fun XiaozhiApp() {
         onHardwareControlEnabledChanged = viewModel::updateHardwareControlEnabled,
         onCameraFacingChanged = viewModel::updateCameraFacing,
         onRefreshCameraFacings = viewModel::refreshCameraFacings,
+        onRecheckHardware = viewModel::recheckHardware,
     )
     if (uploadSession != null) {
         UploadQrDialog(
@@ -683,6 +684,7 @@ private fun XiaozhiScreen(
     onHardwareControlEnabledChanged: (Boolean) -> Unit,
     onCameraFacingChanged: (CameraFacing) -> Unit,
     onRefreshCameraFacings: () -> Unit,
+    onRecheckHardware: () -> Unit,
 ) {
     var everConnected by rememberSaveable { mutableStateOf(false) }
     var startupGraceElapsed by rememberSaveable { mutableStateOf(false) }
@@ -806,6 +808,7 @@ private fun XiaozhiScreen(
                         onDeviceControlEnabledChanged = onDeviceControlEnabledChanged,
                         onHardwareControlEnabledChanged = onHardwareControlEnabledChanged,
                         onCameraFacingChanged = onCameraFacingChanged,
+                        onRecheckHardware = onRecheckHardware,
                     )
                 }
             }
@@ -1470,6 +1473,7 @@ private fun SettingsScreen(
     onDeviceControlEnabledChanged: (Boolean) -> Unit,
     onHardwareControlEnabledChanged: (Boolean) -> Unit,
     onCameraFacingChanged: (CameraFacing) -> Unit,
+    onRecheckHardware: () -> Unit,
 ) {
     val scrollState = rememberScrollState()
 
@@ -1510,6 +1514,7 @@ private fun SettingsScreen(
             onDeviceControlEnabledChanged = onDeviceControlEnabledChanged,
             onHardwareControlEnabledChanged = onHardwareControlEnabledChanged,
             onCameraFacingChanged = onCameraFacingChanged,
+            onRecheckHardware = onRecheckHardware,
         )
     }
 }
@@ -1541,6 +1546,7 @@ private fun DeviceControlCard(
     onDeviceControlEnabledChanged: (Boolean) -> Unit,
     onHardwareControlEnabledChanged: (Boolean) -> Unit,
     onCameraFacingChanged: (CameraFacing) -> Unit,
+    onRecheckHardware: () -> Unit,
 ) {
     SettingsCard {
         SettingsSwitch(
@@ -1589,6 +1595,20 @@ private fun DeviceControlCard(
             icon = if (state.deviceControlEnabled || state.hardwareControlEnabled) "🔧" else "🚫",
             title = "本机硬件自检",
             subtitle = state.deviceControlStatus.ifBlank { "正在检测本机的云台、补光灯和音量…" },
+        )
+
+        // 自检结论会缓存 24 小时（见 HardwareProbeRepository），所以必须给一个当场重测的出口，
+        // 否则用户插上 USB 摄像头、或者换了块板子之后，看到的一直是昨天那个结论。
+        HorizontalDivider()
+        SettingsAction(
+            icon = "🧪",
+            title = "重新自检",
+            // 两句之间必须断开：状态串本身没有句号（形如「上次自检：3 小时前」），
+            // 紧跟着接下一句会读成「3 小时前换过硬件」，正好把意思读反。
+            subtitle = state.hardwareProbeStatus.ifBlank { "本机还没做过硬件自检。" } +
+                "\n换过硬件、或者结果看着不对时点一下重测。",
+            actionLabel = "重测",
+            onClick = onRecheckHardware,
         )
     }
 }

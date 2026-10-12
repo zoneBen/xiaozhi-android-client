@@ -202,6 +202,15 @@ data class UiState(
 
     /** 设置页给用户看的一句话：本机到底认没认出云台和补光灯。 */
     val deviceControlStatus: String = "",
+
+    /**
+     * 上面那句自检结果是**什么时候**得出的，形如「刚刚」「3 小时前」。
+     *
+     * 硬件自检结果会缓存 24 小时（见 `HardwareProbeRepository`），所以"结论"必须带上"时间"：
+     * 只显示结论的话，用户看到一行 8 小时前的判断却以为是刚测的，
+     * 而点「重新自检」正是为了改变它。
+     */
+    val hardwareProbeStatus: String = "",
     val connectionStatus: ConnectionStatus = ConnectionStatus.DISCONNECTED,
     val isSilentTransportRecovery: Boolean = false,
     val draftMessage: String = "",

@@ -27,11 +27,16 @@ import me.xiaozhi.androidclient.camera.CameraFacing
 import me.xiaozhi.androidclient.camera.CameraVisionTool
 import me.xiaozhi.androidclient.data.AppPreferences
 import me.xiaozhi.androidclient.data.ConversationRepository
+import me.xiaozhi.androidclient.data.HardwareProbeRepository
+import me.xiaozhi.androidclient.data.db.HardwareProbeEntity
+import me.xiaozhi.androidclient.data.toProbeCsv
+import me.xiaozhi.androidclient.data.toProbeFacings
 import me.xiaozhi.androidclient.data.RoleProfileRepository
 import me.xiaozhi.androidclient.data.StoredConfig
 import me.xiaozhi.androidclient.device.BodyGuargzController
 import me.xiaozhi.androidclient.device.SystemVolumeController
 import me.xiaozhi.androidclient.util.ImageSampling
+import me.xiaozhi.androidclient.util.relativeTimeLabel
 import me.xiaozhi.androidclient.integration.TermuxCommandEvents
 import me.xiaozhi.androidclient.integration.TermuxCommandResult
 import me.xiaozhi.androidclient.integration.TermuxRunner
@@ -151,6 +156,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val storedConfig = preferences.load()
     private val roleProfileRepository = RoleProfileRepository(application)
     private val conversationRepository = ConversationRepository(application)
+    private val hardwareProbeRepository = HardwareProbeRepository(application)
 
     /** 距上次 [ConversationRepository.pruneRole] 又写了几条消息，见 [persistMessage]。 */
     private var messagesSincePrune = 0
@@ -322,14 +328,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
         addLog("客户端已就绪")
         addLog("当前使用未烧录设备接入模式")
-        // 云台/补光灯的可用性只能靠反射探测，结果写进日志和设置页。
-        // 这台机器上到底认没认出来，是这一版最需要真机确认的一件事。
-        addLog("本地设备控制：${bodyGuargzController.describe()}")
-        addLog("媒体音量：${systemVolumeController.availabilityLabel()}，当前 ${systemVolumeController.volumePercent() ?: "读不到"}%")
-        // 认不认得出云台/补光灯是**构造时反射解析**的结果，进程生命周期内不变，所以探一次就够。
-        // 设置页靠它决定硬件开关要不要置灰。
-        val hardwareAvailable = bodyGuargzController.gimbalAvailable || bodyGuargzController.lightAvailable
-        addLog("本机硬件开关${if (hardwareAvailable) "可用" else "置灰"}：hardwareControlAvailable=$hardwareAvailable")
         // 两个开关的**实际生效值**也记一条。它是升级迁移唯一的可观测点：
         // 老装机上 `hardware_control_enabled` 这个键还不存在，值是从老总开关继承来的
         // （见 AppPreferences.load），光看设置页分不清"继承对了"还是"默认成了 true"——
@@ -338,19 +336,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             "本地设备控制开关：拍照与音量=${uiState.value.deviceControlEnabled}，" +
                 "云台与补光灯=${uiState.value.hardwareControlEnabled}",
         )
-        updateState {
-            copy(
-                hardwareControlAvailable = hardwareAvailable,
-                cameraFacingChoices = cameraVisionTool.availableBuiltinFacings(),
-                // 这一句只说**硬件事实**（本机有没有这个硬件），不掺开关状态。
-                // 掺进来就有三处要跟着开关重算（这里 + 两个 setter），迟早有一处漏掉、
-                // 变成一行对着开关撒谎的旧文案。开关状态由上面那两行自己显示。
-                deviceControlStatus = listOf(
-                    bodyGuargzController.availabilityLabel(),
-                    systemVolumeController.availabilityLabel(),
-                ).joinToString("，"),
-            )
-        }
+        refreshHardwareProbe(force = false)
         nanoSerialBridge.start()
         reminderScheduler.start()
         viewModelScope.launch {
@@ -1213,6 +1199,105 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 cameraFacing = stored.takeIf { choices.isEmpty() || it in choices } ?: fallback ?: stored,
             )
         }
+    }
+
+    /**
+     * 用户点了设置页的「重新自检」。
+     *
+     * 只做一件事：不管缓存多新都重探一遍（`force = true`）。写回走 REPLACE，
+     * 所以不需要先清表——清表反而是多一次写库。
+     */
+    fun recheckHardware() {
+        addLog("用户点了「重新自检」，正在重探本机硬件…")
+        refreshHardwareProbe(force = true)
+    }
+
+    /**
+     * 本机硬件自检：优先吃缓存，缓存过期（或 [force]）才做一次真探测并写回。
+     *
+     * 值得缓存的是这一整套结论——认不认得出云台/补光灯、有没有音量通道、内置摄像头有哪些朝向。
+     * 它们取决于机型和 ROM，进程重启一百次也是同一个答案，而其中
+     * [CameraVisionTool.availableBuiltinFacings] 还要问一遍 CameraManager。
+     *
+     * **它不替代任何实时通路**：设置页每次打开仍会实时重查摄像头朝向
+     * （见 [refreshCameraFacings]），麦克风仍由 [startMicrophoneWatch] 持续巡检。
+     * 缓存只作用在启动路径上。
+     */
+    private fun refreshHardwareProbe(force: Boolean) {
+        viewModelScope.launch {
+            val now = System.currentTimeMillis()
+            // 上一次的行无论新不新都读出来：真探测时要拿它给"没答案"的项兜底。
+            val previous = hardwareProbeRepository.load()
+            val cached = previous?.takeIf { !force && HardwareProbeRepository.isFresh(it, now) }
+            if (cached != null) {
+                applyHardwareProbe(cached, now)
+                addLog("本机硬件自检命中缓存（${relativeTimeLabel(now - cached.probedAtEpochMs)}的结论），本次不重探")
+                return@launch
+            }
+            val probed = runCatching { probeHardware(now, previous) }
+                .onFailure { addLog("本机硬件自检失败：${it.message ?: it.javaClass.simpleName}") }
+                .getOrNull() ?: return@launch
+            applyHardwareProbe(probed, now)
+            runCatching { hardwareProbeRepository.save(probed) }
+                .onFailure { addLog("自检结果写入缓存失败：${it.message ?: it.javaClass.simpleName}") }
+        }
+    }
+
+    private fun applyHardwareProbe(probe: HardwareProbeEntity, nowEpochMs: Long) {
+        updateState {
+            copy(
+                hardwareControlAvailable = probe.hardwareControlAvailable,
+                // 只说**硬件事实**（本机有没有这个硬件），不掺开关状态。
+                // 掺进来就有三处要跟着开关重算（这里 + 两个 setter），迟早有一处漏掉、
+                // 变成一行对着开关撒谎的旧文案。开关状态由界面自己显示。
+                deviceControlStatus = probe.deviceControlStatus,
+                cameraFacingChoices = probe.cameraFacingChoicesCsv.toProbeFacings(),
+                hardwareProbeStatus = "上次自检：${relativeTimeLabel(nowEpochMs - probe.probedAtEpochMs)}",
+            )
+        }
+    }
+
+    /**
+     * 真探测一次。跑在 IO 线程上——`describe()` 要 stat 几个 sysfs 节点、
+     * `availableBuiltinFacings()` 要问 CameraManager，都不该占着主线程。
+     */
+    private suspend fun probeHardware(
+        nowEpochMs: Long,
+        previous: HardwareProbeEntity?,
+    ): HardwareProbeEntity = withContext(Dispatchers.IO) {
+        // 云台/补光灯的可用性只能靠反射探测，这台机器上到底认没认出来，
+        // 是最需要真机确认的一件事，所以**每次真探测**都把完整描述写进日志
+        // （命中缓存的时候不写，日志里会换成"本次不重探"那一行）。
+        addLog("本地设备控制：${bodyGuargzController.describe()}")
+        val volumeLabel = systemVolumeController.availabilityLabel()
+        val volumePercent = systemVolumeController.volumePercent()
+        addLog("媒体音量：$volumeLabel，当前 ${volumePercent ?: "读不到"}%")
+        val hardwareAvailable = bodyGuargzController.gimbalAvailable || bodyGuargzController.lightAvailable
+        addLog("本机硬件开关${if (hardwareAvailable) "可用" else "置灰"}：hardwareControlAvailable=$hardwareAvailable")
+
+        val facings = runCatching { cameraVisionTool.availableBuiltinFacings() }.getOrDefault(emptyList())
+        // **空枚举当"没答案"，不当"没有摄像头"。** 相机服务没就绪时枚举出来就是空的，
+        // 存进去等于把一次启动失败记成 24 小时的结论——而设置页那一行会因此永远不出现。
+        // 沿用上一次已知有效的值，拿不到就存空串。
+        val facingCsv = if (facings.isNotEmpty()) {
+            facings.toProbeCsv()
+        } else {
+            previous?.cameraFacingChoicesCsv.orEmpty()
+        }
+
+        HardwareProbeEntity(
+            // 麦克风这一对只是快照，**不驱动启动闸**——理由见 HardwareProbeRepository 的类注释。
+            microphoneReady = uiState.value.microphoneReady,
+            microphoneMessage = uiState.value.microphoneMessage,
+            hardwareControlAvailable = hardwareAvailable,
+            deviceControlStatus = listOf(
+                bodyGuargzController.availabilityLabel(),
+                volumeLabel,
+            ).joinToString("，"),
+            cameraFacingChoicesCsv = facingCsv,
+            volumeAvailable = volumePercent != null,
+            probedAtEpochMs = nowEpochMs,
+        )
     }
 
     fun updateWakeWordStatus(status: String) {
