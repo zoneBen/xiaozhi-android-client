@@ -35,6 +35,8 @@ import me.xiaozhi.androidclient.data.RoleProfileRepository
 import me.xiaozhi.androidclient.data.StoredConfig
 import me.xiaozhi.androidclient.device.BodyGuargzController
 import me.xiaozhi.androidclient.device.SystemVolumeController
+import me.xiaozhi.androidclient.email.MailSettingsStore
+import me.xiaozhi.androidclient.email.PhotoEmailer
 import me.xiaozhi.androidclient.util.ImageSampling
 import me.xiaozhi.androidclient.util.relativeTimeLabel
 import me.xiaozhi.androidclient.integration.TermuxCommandEvents
@@ -42,6 +44,7 @@ import me.xiaozhi.androidclient.integration.TermuxCommandResult
 import me.xiaozhi.androidclient.integration.TermuxRunner
 import me.xiaozhi.androidclient.integration.NanoSerialBridge
 import me.xiaozhi.androidclient.mcp.DeviceToolSet
+import me.xiaozhi.androidclient.mcp.EmailToolSet
 import me.xiaozhi.androidclient.mcp.McpCameraServer
 import me.xiaozhi.androidclient.model.ActivationInfo
 import me.xiaozhi.androidclient.model.ChatMessage
@@ -291,6 +294,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         volumeEnabled = { uiState.value.deviceControlEnabled },
     )
 
+    /**
+     * 邮件工具。邮箱设置存在**独立的 prefs 文件**里（见 [MailSettingsStore]），
+     * 所以这里不必、也不能把它塞进 `UiState`/`StoredConfig`——那两个是整包写回的，
+     * 会让设置页刚存的 SMTP 密码被下一次 `persist()` 静默抹掉。
+     */
+    private val photoEmailer = PhotoEmailer(
+        cameraVisionTool = cameraVisionTool,
+        mailSettings = MailSettingsStore(application),
+        log = ::addLog,
+    )
+
+    private val emailToolSet = EmailToolSet(photoEmailer = photoEmailer)
+
     private val mcpCameraServer = McpCameraServer(
         cameraVisionTool = cameraVisionTool,
         realtimeClient = realtimeClient,
@@ -307,6 +323,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             activeScheduledPrompt?.text?.startsWith(SUPERVISION_START_CODE_PHRASE) == true
         },
         deviceToolSet = deviceToolSet,
+        emailToolSet = emailToolSet,
         cameraEnabled = { uiState.value.deviceControlEnabled },
         pendingUserMessage = ::takePendingUserMessage,
         onToolsDeclared = ::onMcpToolsDeclared,

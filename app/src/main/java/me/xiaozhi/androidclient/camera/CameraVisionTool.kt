@@ -137,6 +137,30 @@ class CameraVisionTool(
     }
 
     /**
+     * 拍一张照片并落盘，返回那个文件。**不碰服务端的视觉上传**——"拍照发邮件"要的是
+     * 图片本身，走上传等于绕一大圈把图交给云端再拿一段文字描述，图的像素反而拿不到。
+     *
+     * 和 [takePhotoAndExplain] 共用同一个开关闸和同一段采集代码，所以"用户在设置里关了
+     * 拍照，设备就真的一张也不拍"对两个入口同时成立——这是把闸设在工具自己身上的收益，
+     * 将来再多一个入口也绕不过去。
+     *
+     * 落盘失败会抛 [IOException] 而**不是**返回 null：这个方法存在的意义就是给调用方
+     * 一个能当附件的文件，拿不到文件时调用方没有任何可继续的动作。这和
+     * [takePhotoAndExplain] 那边"落盘失败不影响主流程"的取舍正好相反，因为那边的主流程
+     * 是上传，这边的主流程是"把这张图发出去"。
+     */
+    suspend fun captureToFile(): File {
+        check(enabled()) { CAMERA_DISABLED_MESSAGE }
+        require(ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
+            "Android camera permission is not granted"
+        }
+        val jpeg = captureJpeg()
+        val file = storePhoto(jpeg) ?: throw IOException("照片存不下来，可能是存储空间满了")
+        onPhotoCaptured(file)
+        return file
+    }
+
+    /**
      * 把这一张存成独立文件，返回给界面用。
      *
      * 存不下就返回 null——**不能因为写文件失败就把拍照整条挂掉**，上传识别才是主流程。

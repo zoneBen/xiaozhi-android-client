@@ -22,6 +22,13 @@ class McpCameraServer(
     /** 本地设备（云台 / 补光灯 / 音量）工具。用户可以在设置里分组关掉。 */
     private val deviceToolSet: DeviceToolSet,
     /**
+     * 邮件工具（拍照发邮件 / 发文字邮件）。邮箱没配好或总开关关着时不声明。
+     *
+     * 和 [deviceToolSet] 并列而不是塞进去：那边的模型是"本机有没有这个硬件"，
+     * 这边是"用户有没有把邮箱配好"，两件事的判据完全不同。
+     */
+    private val emailToolSet: EmailToolSet,
+    /**
      * 用户有没有开着拍照。false 时不声明摄像头工具、监督描述里也不再提拍照。
      *
      * 这里只管"别告诉模型有这个工具"。**执行期的拒绝不在这里**——它收在
@@ -113,6 +120,9 @@ class McpCameraServer(
         // 不声明 = 模型不知道它存在 = 不可能误动作，这就是"可以关闭"的落点。
         val deviceTools = deviceToolSet.schemas()
         deviceTools.forEach { tools.put(it) }
+        // 邮件工具：总开关关着、或服务器凭据还没填完时是空列表（见 EmailToolSet.schemas）。
+        val emailTools = emailToolSet.schemas()
+        emailTools.forEach { tools.put(it) }
         replyResult(id, JSONObject().put("tools", tools))
         // 「没声明」有两个来源，日志里要分开：用户关掉的（**用户已关闭：…**），
         // 和这台机器本来就没有的。后者不能写成前者——那会让人去找一个点不动的开关。
@@ -125,6 +135,7 @@ class McpCameraServer(
                 append("已向服务端声明定时提醒、监督和用户文字工具")
                 if (cameraOn) append("、摄像头")
                 if (deviceTools.isNotEmpty()) append("和 ${deviceTools.size} 个本地设备工具")
+                if (emailTools.isNotEmpty()) append("、${emailTools.size} 个邮件工具")
                 if (skippedByUser.isNotEmpty()) append("（用户已关闭：${skippedByUser.joinToString("、")}）")
             },
         )
@@ -142,6 +153,10 @@ class McpCameraServer(
                 is DeviceToolOutcome.Success -> replyResult(id, toolTextResult(outcome.text))
                 is DeviceToolOutcome.Failure -> replyError(id, outcome.message)
             }
+            return
+        }
+        if (emailToolSet.isEmailTool(name)) {
+            handleEmailCall(id, requestSessionId, name, args)
             return
         }
         when (name) {
@@ -245,8 +260,35 @@ class McpCameraServer(
         }
     }
 
-    private fun replyResult(id: Any, result: JSONObject) {
-        realtimeClient.sendMcp(
+    /**
+     * 邮件工具。拍照要十几秒、SMTP 也要几秒，**绝不能占着 WebSocket 的线程**，
+     * 所以照 [handleCameraCall] 那样扔进 IO 协程，结果异步回给服务端。
+     *
+     * 和那条路**有一处刻意的不同**：会话已经不在场时，这条路照样把邮件发出去，
+     * 只是不再回话。理由是这一侧的产物是一封真的邮件——用户要的是照片进邮箱，
+     * 不是"当前回合里听到一句话"。网络抖一下就把已经拍好的照片整张丢掉，
+     * 比多发一封用户本来就要求的邮件更糟。
+     */
+    private fun handleEmailCall(id: Any, requestSessionId: String?, name: String, args: JSONObject) {
+        scope.launch(Dispatchers.IO) {
+            // 开头的闸（总开关 / 配置是否齐）在 emailToolSet.call 里同步判完，
+            // 所以"会话中途被用户关掉"这种情形不会真去拍一张、发一封。
+            val outcome = emailToolSet.call(name, args)
+            val canReply = requestSessionId != null && isCurrentSession(requestSessionId)
+            when (outcome) {
+                is DeviceToolOutcome.Success -> {
+                    log("邮件工具完成：${outcome.text}${if (canReply) "" else "（原会话已结束，未回话）"}")
+                    if (canReply) replyResult(id, toolTextResult(outcome.text))
+                }
+                is DeviceToolOutcome.Failure -> {
+                    log("邮件工具失败：${outcome.message}")
+                    if (canReply) replyError(id, outcome.message)
+                }
+            }
+        }
+    }
+
+    private fun replyResult(id: Any, result: JSONObject) {        realtimeClient.sendMcp(
             JSONObject()
                 .put("jsonrpc", "2.0")
                 .put("id", id)
