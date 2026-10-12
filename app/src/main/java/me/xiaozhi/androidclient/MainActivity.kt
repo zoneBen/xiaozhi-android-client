@@ -141,6 +141,7 @@ import me.xiaozhi.androidclient.model.hasCompleteDigitalHuman
 import me.xiaozhi.androidclient.model.videoPath
 import me.xiaozhi.androidclient.model.canRunWakeWordRecognizer
 import me.xiaozhi.androidclient.ui.MainViewModel
+import me.xiaozhi.androidclient.ui.settings.AboutCard
 import me.xiaozhi.androidclient.ui.theme.XiaozhiClientTheme
 
 private enum class AppScreen { CHAT, SETTINGS }
@@ -1501,6 +1502,8 @@ private fun SettingsScreen(
             onCheckForUpdate = onCheckForUpdate,
             onStartUpdate = onStartUpdate,
         )
+
+        AboutCard()
 
         DeviceControlCard(
             state = state,
