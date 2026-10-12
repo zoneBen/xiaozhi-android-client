@@ -34,6 +34,14 @@ data class ScheduledReminder(
     val deliveryPending: Boolean = false,
 )
 
+/**
+ * 会话内的临时提醒与摄像头监督：靠 [scope] 里的 ticker 到点回调，进程活着就响。
+ *
+ * **这里刻意不管**用户手建、要跨重启、要周期重复的定时任务——那些走系统闹钟那一套
+ * （`TaskAlarmScheduler` / `TaskAlarmReceiver`，周期描述见 [RecurrenceSpec] 的文件头）。
+ * 分成两套是可靠性契约不同（进程内 ticker vs 系统闹钟），不是历史遗留，**不要合并**。
+ * 两套共用 [ReminderDeliveryPolicy]，所以"提醒撞上正在进行的对话"的中断语义是一致的。
+ */
 class ReminderScheduler(
     context: Context,
     private val scope: CoroutineScope,
