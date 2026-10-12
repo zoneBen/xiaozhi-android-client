@@ -98,7 +98,7 @@ class PhotoEmailer(
     private fun readyConfig(): EmailConfig? = mailSettings.load().takeIf { mailSendProblem(it) == null }
 
     /**
-     * 拍一张，拿不到文件就把异常**原样**交出去。
+     * 拍一张，拿不到就把异常**原样**交出去。
      *
      * 分开写是因为不能简单地 `runCatching`：[CancellationException] 必须重抛，
      * 协程被取消时把它吞成一次"拍照失败"会让上层的取消逻辑失效（而取消在这里是常态——
@@ -109,7 +109,7 @@ class PhotoEmailer(
     } catch (cancelled: CancellationException) {
         throw cancelled
     } catch (error: Exception) {
-        Result.failure(error)
+        Result.failure(PhotoCaptureException(error.message ?: "拍照失败", error))
     }
 
     /**

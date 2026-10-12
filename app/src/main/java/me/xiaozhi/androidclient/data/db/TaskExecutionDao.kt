@@ -30,6 +30,20 @@ interface TaskExecutionDao {
     fun observeReadyPending(now: Long): Flow<List<TaskExecutionEntity>>
 
     /**
+     * 和 [observeReadyPending] 同一条查询，只是**一次性**取回。
+     *
+     * 两个都要，不是重复：消费者是**轮询**的，理由见 `ScheduledTaskRunner` 的类注释
+     * （退避到点时表没有任何写入，Flow 永远收不到通知）。每次订阅一个 Flow 再
+     * 立刻取消，等于白建一个失效观察者。
+     */
+    @Query(
+        "SELECT * FROM task_executions WHERE status = 'PENDING' " +
+            "AND (nextAttemptAtEpochMs IS NULL OR nextAttemptAtEpochMs <= :now) " +
+            "ORDER BY scheduledAtEpochMs ASC LIMIT :limit",
+    )
+    suspend fun readyPending(now: Long, limit: Int): List<TaskExecutionEntity>
+
+    /**
      * 原子认领：靠**受影响行数**判断有没有抢到。
      *
      * 返回 1 = 抢到了，返回 0 = 别人先动了手。抽成一条 UPDATE 而不是

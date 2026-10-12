@@ -69,6 +69,12 @@ class ScheduledTaskRepository(
     fun observeReadyPending(nowEpochMs: Long): Flow<List<TaskExecutionEntity>> =
         executionDao.observeReadyPending(nowEpochMs)
 
+    /** 一次性取回待办（轮询用，见 `ScheduledTaskRunner` 的类注释）。 */
+    suspend fun readyPending(
+        nowEpochMs: Long,
+        limit: Int = DEFAULT_DRAIN_LIMIT,
+    ): List<TaskExecutionEntity> = executionDao.readyPending(nowEpochMs, limit)
+
     suspend fun enqueue(execution: TaskExecutionEntity): Long = executionDao.insert(execution)
 
     /** 这个发生点是不是已经有记录了。补跑幂等靠它，详见 [TaskExecutionDao.countAt]。 */
@@ -90,6 +96,14 @@ class ScheduledTaskRepository(
 
     companion object {
         const val DEFAULT_RECENT_EXECUTIONS = 50
+
+        /**
+         * 一轮最多取几条待办。**必须有上限**：这里是顺序执行的，而每一条都可能要等
+         * 十几秒（让出对话 + 重试）。真关机一整夜攒下几十条 PENDING 时，一次全捞出来
+         * 会让第一条之后的记录迟迟得不到处理，界面上看起来像卡死了。
+         * 剩下的下一轮（1 秒后）自然会取到。
+         */
+        const val DEFAULT_DRAIN_LIMIT = 5
 
         /** 执行记录的总上限。和对话历史一样是兜底，不是回滚语义。 */
         const val MAX_EXECUTIONS = 2000

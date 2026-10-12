@@ -67,11 +67,13 @@ import me.xiaozhi.androidclient.network.OtaConfigService
 import me.xiaozhi.androidclient.network.canReuseLiveConnection
 import me.xiaozhi.androidclient.audio.uploadDuringPlayback
 import me.xiaozhi.androidclient.network.XiaozhiRealtimeClient
+import me.xiaozhi.androidclient.scheduling.ExternalSend
 import me.xiaozhi.androidclient.scheduling.ReminderConversationState
 import me.xiaozhi.androidclient.scheduling.ReminderDeliveryAction
 import me.xiaozhi.androidclient.scheduling.ReminderDeliveryPolicy
 import me.xiaozhi.androidclient.scheduling.ReminderScheduler
 import me.xiaozhi.androidclient.scheduling.ScheduledTaskRecovery
+import me.xiaozhi.androidclient.scheduling.ScheduledTaskRunner
 import me.xiaozhi.androidclient.scheduling.ReminderKind
 import me.xiaozhi.androidclient.scheduling.ScheduledReminder
 import me.xiaozhi.androidclient.scheduling.SupervisionPhase
@@ -312,6 +314,22 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private val emailToolSet = EmailToolSet(photoEmailer = photoEmailer)
 
+    /**
+     * 定时任务的执行者。**必须活在 ViewModel 里**：闹钟 receiver 只写库、绝不碰 ViewModel
+     * （那条边界见 `TaskAlarmReceiver` 的文件头），从「库里有条 PENDING」到「真的说了句话」
+     * 之间就是它。ViewModel 一没，定时任务就只剩记账。
+     */
+    private val scheduledTaskRunner = ScheduledTaskRunner(
+        scope = viewModelScope,
+        repository = scheduledTaskRepository,
+        conversationState = ::reminderConversationState,
+        yieldForTask = ::yieldConversationForTask,
+        announceTask = { title -> addChatMessage(ChatRole.SYSTEM, "【定时任务】$title") },
+        injectText = ::submitExternalMessage,
+        captureAndSendPhoto = { to, subject -> photoEmailer.captureAndSend(to, subject, null) },
+        note = ::addLog,
+    )
+
     private val mcpCameraServer = McpCameraServer(
         cameraVisionTool = cameraVisionTool,
         realtimeClient = realtimeClient,
@@ -378,6 +396,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             runCatching { ScheduledTaskRecovery.run(scheduledTaskRepository, taskAlarmScheduler) }
                 .onFailure { addLog("定时任务恢复失败：${it.message.orEmpty()}") }
         }
+        scheduledTaskRunner.start()
         viewModelScope.launch {
             delay(AUTO_START_DELAY_MS)
             networkTimeSynchronizer.awaitValidSystemTime(::addLog)
@@ -2217,21 +2236,26 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
-     * 供开发期调试接口使用：等价于用户在输入框里打下这段文字并按下发送。
+     * 从外部投一句话进对话：供开发期调试接口与**定时任务**使用，等价于用户在输入框里
+     * 打下这段文字并按下发送。
+     *
      * 刻意复用 updateDraftMessage + sendDraftMessage 这条完全相同的路径，
      * 不绕过“设备正忙”等任何门控，否则自动测出来的结论不代表用户会遇到的路径。
-     * 返回一句人可读的结果，供断言。
+     *
+     * 返回值是一句**中文结果**，而它是一条跨类的约定：定时任务那边靠
+     * `ExternalSend.SENT` / `ExternalSend.BUSY` 判断该记成功还是该重试。
+     * 所以三个字面量提到 `ExternalSend` 里，改文案时至少会先看到那里。
      */
     fun submitExternalMessage(text: String): String {
         val prompt = text.trim()
-        if (prompt.isBlank()) return "文本为空，未发送"
+        if (prompt.isBlank()) return ExternalSend.EMPTY
         val state = uiState.value
         if (state.isRecording || state.isAssistantSpeaking || state.isTurnActive) {
-            return "设备正忙，未发送"
+            return ExternalSend.BUSY
         }
         updateDraftMessage(prompt)
         sendDraftMessage()
-        return "已发送"
+        return ExternalSend.SENT
     }
 
     fun sendDraftMessage() {
@@ -2491,18 +2515,26 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private fun nextSupervisionRetrySeconds(checkCount: Int): Int =
         SupervisionPolicy.nextRetrySeconds(checkCount)
 
+    /**
+     * 当前对话状态，给投递策略 [ReminderDeliveryPolicy] 判定用。
+     *
+     * 提醒与定时任务**共用同一份**：两处各拼一次的话，将来加一个字段（比如"正在放音乐"）
+     * 只改一处，两套引擎对"什么时候能插话"的理解就会悄悄分叉。
+     */
+    private fun reminderConversationState(): ReminderConversationState {
+        val state = uiState.value
+        return ReminderConversationState(
+            connected = state.connectionStatus == ConnectionStatus.CONNECTED,
+            isRecording = state.isRecording,
+            isAssistantSpeaking = state.isAssistantSpeaking,
+            isTurnActive = state.isTurnActive,
+            hasActiveDelivery = activeScheduledPrompt != null,
+        )
+    }
+
     private fun coordinateScheduledPromptDelivery() {
         if (pendingScheduledPrompts.isEmpty()) return
-        val state = uiState.value
-        when (ReminderDeliveryPolicy.decide(
-            ReminderConversationState(
-                connected = state.connectionStatus == ConnectionStatus.CONNECTED,
-                isRecording = state.isRecording,
-                isAssistantSpeaking = state.isAssistantSpeaking,
-                isTurnActive = state.isTurnActive,
-                hasActiveDelivery = activeScheduledPrompt != null,
-            ),
-        )) {
+        when (ReminderDeliveryPolicy.decide(reminderConversationState())) {
             ReminderDeliveryAction.PAUSE_LISTENING_AFTER_GRACE -> {
                 scheduleListeningPauseForReminder()
                 return
@@ -2588,6 +2620,63 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    /**
+     * 让出对话，好让一条到点的**定时任务**插进来。
+     *
+     * [action] 由 [ReminderDeliveryPolicy] 判出来，宽限期跟着它走——判定和动作是同一个人下的，
+     * 这里不再重猜一遍「到底该等 3 秒还是 5 秒」。
+     *
+     * **为什么不像提醒那样写成 `viewModelScope.launch` 的 Job**：那两处
+     * （[scheduleListeningPauseForReminder] / [scheduleCurrentTurnInterruptionForReminder]）
+     * 是"发出去就不管了"的：它们等完宽限期后回到 `coordinateScheduledPromptDelivery()`，
+     * 由那条队列自己接着走。定时任务的投递是**同步等待结果**的（要拿到"已发送/设备正忙"
+     * 才能决定是记账还是重排），所以必须是可挂起的直连函数，不能是 fire-and-forget。
+     *
+     * 两边的判定共用同一个策略对象，语义一致；这里重复的只是"怎么让"那二十来行。
+     * 把它们抽成公共函数是可行的，但那要动已经验证过的提醒链路——风险不匹配收益，
+     * 留着这条注释比留着一处改动更值。
+     */
+    private suspend fun yieldConversationForTask(action: ReminderDeliveryAction) {
+        when (action) {
+            ReminderDeliveryAction.PAUSE_LISTENING_AFTER_GRACE -> {
+                delay(REMINDER_LISTENING_GRACE_MS)
+                // 等完宽限期可能已经不忙了（用户自己说完了），再问一次当前状态。
+                if (uiState.value.isRecording) {
+                    finishListening(
+                        sendStop = true,
+                        stopCapture = true,
+                        keepTurnActive = false,
+                        reason = "定时任务优先，已暂停连续聆听",
+                    )
+                    // 给服务端一点时间收完旧音频回合，再插新消息。
+                    delay(500L)
+                }
+            }
+
+            ReminderDeliveryAction.INTERRUPT_CURRENT_TURN_AFTER_GRACE -> {
+                delay(REMINDER_CURRENT_TURN_GRACE_MS)
+                val state = uiState.value
+                if (
+                    state.connectionStatus == ConnectionStatus.CONNECTED &&
+                    state.isTurnActive &&
+                    !state.isRecording &&
+                    !state.isAssistantSpeaking
+                ) {
+                    conversationLoopActive = false
+                    pendingListeningMode = null
+                    updateState { copy(isTurnActive = false) }
+                    realtimeClient.sendAbort("定时任务优先")
+                    setNanoState("PROCESSING")
+                    addLog("定时任务优先，已结束停滞的旧回合")
+                    delay(500L)
+                }
+            }
+
+            // 判定方只会在这两种动作上叫我们，其余情形 runner 自己走重试。
+            else -> Unit
+        }
+    }
+
     private fun cancelScheduledDeliveryJob() {
         scheduledDeliveryJob?.cancel()
         scheduledDeliveryJob = null
@@ -2616,6 +2705,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         cancelScheduledDeliveryJob()
         supervisionVerificationJob?.cancel()
         cancelReconnect()
+        scheduledTaskRunner.stop()
         cancelExpectedGoodbyeDisconnect()
         realtimeClient.disconnect(notify = false)
         nanoSerialBridge.close()
