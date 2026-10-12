@@ -51,6 +51,10 @@ class ScheduledTaskRepository(
     suspend fun recordFired(id: Long, nextFireAtEpochMs: Long?, firedAtEpochMs: Long) =
         taskDao.recordFired(id, nextFireAtEpochMs, firedAtEpochMs, now())
 
+    /** 只重算下一次（改时区 / 改系统时间后重排），不算作一次触发。 */
+    suspend fun setNextFire(id: Long, nextFireAtEpochMs: Long?) =
+        taskDao.setNextFire(id, nextFireAtEpochMs, now())
+
     /** 一次性任务用掉之后关掉自己，不删。 */
     suspend fun retire(id: Long) = taskDao.retire(id, now())
 

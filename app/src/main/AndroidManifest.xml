@@ -9,6 +9,11 @@
     <uses-permission android:name="android.permission.CAMERA" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+    <!-- 定时任务。SCHEDULE_EXACT_ALARM 在 Android 12+ 是「特殊权限」：不授权不会崩，
+         但闹钟会降级成不精确的（见 TaskAlarmScheduler）。POST_NOTIFICATIONS 是 33+ 的
+         运行时权限，在「定时任务」页首次保存任务时才申请。 -->
+    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="com.termux.permission.RUN_COMMAND" />
 
     <uses-feature
@@ -79,6 +84,25 @@
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
                 <action android:name="android.intent.action.QUICKBOOT_POWERON" />
                 <action android:name="com.htc.intent.action.QUICKBOOT_POWERON" />
+            </intent-filter>
+        </receiver>
+        <!-- 定时任务到点。闹钟的 PendingIntent 是本应用自己发的显式广播，
+             不需要也不应该导出。 -->
+        <receiver
+            android:name=".scheduling.TaskAlarmReceiver"
+            android:enabled="true"
+            android:exported="false" />
+        <!-- 改时区 / 改系统时间 / 应用被覆盖安装之后重排全部闹钟。
+             这三个都是受保护的系统广播，exported="false" 不影响投递（系统不受该限制），
+             但确实挡住了别的应用拿它来骚扰我们。 -->
+        <receiver
+            android:name=".scheduling.TaskAlarmRescheduleReceiver"
+            android:enabled="true"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.TIME_SET" />
+                <action android:name="android.intent.action.TIMEZONE_CHANGED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
             </intent-filter>
         </receiver>
         <service
