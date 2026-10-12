@@ -595,6 +595,9 @@ private fun XiaozhiApp() {
         onCameraFacingChanged = viewModel::updateCameraFacing,
         onRefreshCameraFacings = viewModel::refreshCameraFacings,
         onRecheckHardware = viewModel::recheckHardware,
+        onClearActiveRoleHistory = viewModel::clearActiveRoleHistory,
+        onClearAllHistory = viewModel::clearAllHistory,
+        onRefreshHistoryCounts = viewModel::refreshHistoryCounts,
     )
     if (uploadSession != null) {
         UploadQrDialog(
@@ -703,6 +706,9 @@ private fun XiaozhiScreen(
     onCameraFacingChanged: (CameraFacing) -> Unit,
     onRefreshCameraFacings: () -> Unit,
     onRecheckHardware: () -> Unit,
+    onClearActiveRoleHistory: () -> Unit,
+    onClearAllHistory: () -> Unit,
+    onRefreshHistoryCounts: () -> Unit,
 ) {
     var everConnected by rememberSaveable { mutableStateOf(false) }
     var startupGraceElapsed by rememberSaveable { mutableStateOf(false) }
@@ -728,8 +734,16 @@ private fun XiaozhiScreen(
     // 说明枚举本身就有前后不一致的时候。）每次打开设置页重查，给这种一次性失败一个自愈机会。
     //
     // 只查内置的朝向，所以外接相机既不会被列进来，也不会让选项凭空多出或少掉一项。
+    //
+    // 同一个时机也查一次对话历史条数：设置首页那行摘要和「对话与历史」页都要显示它。
+    // **挂在"进设置页"而不是挂在"点齿轮"那个回调上**——进设置页的路不止一条
+    // （调试口的 action=settings 就直接切屏），挂在入口回调上就会漏掉其中一条，
+    // 表现为首页写着"还没有对话记录"、点进去其实是满的。
     LaunchedEffect(currentScreen) {
-        if (currentScreen == AppScreen.SETTINGS) onRefreshCameraFacings()
+        if (currentScreen == AppScreen.SETTINGS) {
+            onRefreshCameraFacings()
+            onRefreshHistoryCounts()
+        }
     }
     // 用户看到麦克风自检失败的提示后，可以主动收起这层继续用（避免卡死）。
     var startupOverlayDismissed by rememberSaveable { mutableStateOf(false) }
@@ -858,8 +872,9 @@ private fun XiaozhiScreen(
                         onHardwareControlEnabledChanged = onHardwareControlEnabledChanged,
                         onCameraFacingChanged = onCameraFacingChanged,
                         onRecheckHardware = onRecheckHardware,
-                    )
-                }
+                        onClearActiveRoleHistory = onClearActiveRoleHistory,
+                        onClearAllHistory = onClearAllHistory,
+                    )                }
             }
 
             // 冷启动期间盖一层明确的进度界面：测试者把“开机后什么都没有”

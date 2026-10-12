@@ -43,3 +43,18 @@ internal fun deviceSettingsSummary(state: UiState): String {
 /** 「关于与更新」这一行：显示当前装的是哪一版。 */
 internal fun aboutSettingsSummary(state: UiState): String =
     "v${state.appVersionName} (Build ${state.appVersionCode})"
+
+/**
+ * 「对话与历史」这一行。
+ *
+ * 条数来自 `UiState.historyTotalCount` / `historyActiveRoleCount`——它们由
+ * `MainViewModel.refreshHistoryCounts()` 在**打开设置页时**查一次填入，不是实时值。
+ * 所以这里只做读数的格式化，一个查询都不发。
+ *
+ * 一条都没有时说「还没有对话记录」而不是「共 0 条」：后者读起来像出了错。
+ */
+internal fun conversationSettingsSummary(state: UiState): String {
+    val total = state.historyTotalCount
+    if (total <= 0) return "还没有对话记录"
+    return "共 $total 条 · 当前角色 ${state.historyActiveRoleCount} 条"
+}

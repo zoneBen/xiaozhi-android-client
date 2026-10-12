@@ -41,6 +41,8 @@ internal fun SettingsHostScreen(
     onHardwareControlEnabledChanged: (Boolean) -> Unit,
     onCameraFacingChanged: (CameraFacing) -> Unit,
     onRecheckHardware: () -> Unit,
+    onClearActiveRoleHistory: () -> Unit,
+    onClearAllHistory: () -> Unit,
 ) {
     when (page) {
         SettingsPage.HOME -> SettingsHomeScreen(
@@ -80,6 +82,13 @@ internal fun SettingsHostScreen(
             onCheckForUpdate = onCheckForUpdate,
             onStartUpdate = onStartUpdate,
         )
+
+        SettingsPage.CONVERSATION -> ConversationHistoryScreen(
+            state = state,
+            padding = padding,
+            onClearActiveRole = onClearActiveRoleHistory,
+            onClearAll = onClearAllHistory,
+        )
     }
 }
 
@@ -109,6 +118,13 @@ private fun SettingsHomeScreen(
                 title = SettingsPage.DEVICE.title,
                 summary = deviceSettingsSummary(state),
                 onClick = { onNavigate(SettingsPage.DEVICE) },
+            )
+            HorizontalDivider()
+            SettingsNavRow(
+                icon = "💬",
+                title = SettingsPage.CONVERSATION.title,
+                summary = conversationSettingsSummary(state),
+                onClick = { onNavigate(SettingsPage.CONVERSATION) },
             )
             HorizontalDivider()
             SettingsNavRow(

@@ -215,6 +215,14 @@ data class UiState(
     val isSilentTransportRecovery: Boolean = false,
     val draftMessage: String = "",
     val chatMessages: List<ChatMessage> = emptyList(),
+    /**
+     * 长期存档里的对话条数：全部角色 / 当前角色。设置页「对话与历史」显示这两个数。
+     *
+     * 是**打开设置页时查出来的快照**，不是实时值——历史条数只在用户说话时变，
+     * 而那时他不在设置页。所以不必为它挂一个常驻的 Room Flow。
+     */
+    val historyTotalCount: Int = 0,
+    val historyActiveRoleCount: Int = 0,
     val scheduledTasks: List<ScheduledTaskUi> = emptyList(),
     // 版本号必须从构建信息读，**绝对不能硬编码**。
     //

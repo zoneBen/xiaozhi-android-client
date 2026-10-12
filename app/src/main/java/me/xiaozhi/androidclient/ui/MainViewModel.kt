@@ -807,6 +807,73 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         addLog("已清空${target?.displayName ?: "该角色"}的数字人素材与头像")
     }
 
+    /**
+     * 查一次历史条数（总数 + 当前角色），填进 [UiState.historyTotalCount] 一族。
+     *
+     * 由界面在**打开设置页时**调用。刻意不做成 Room `Flow` 的常驻观察：条数只在用户
+     * 说话时变化，而那时他不在设置页；为它挂一个常驻查询，多一份要跟着生命周期维护的
+     * 东西，换来的是一个用户根本看不到的"实时"。
+     */
+    fun refreshHistoryCounts() {
+        val roleId = activeRoleId
+        viewModelScope.launch {
+            runCatching {
+                val total = conversationRepository.countAll()
+                val forRole = if (roleId.isBlank()) 0 else conversationRepository.countForRole(roleId)
+                total to forRole
+            }.onSuccess { (total, forRole) ->
+                updateState { copy(historyTotalCount = total, historyActiveRoleCount = forRole) }
+            }.onFailure {
+                addLog("统计对话历史条数失败：${it.message ?: it.javaClass.simpleName}")
+            }
+        }
+    }
+
+    /**
+     * 清空**当前角色**的对话历史。
+     *
+     * 界面上有二次确认，所以进到这里就是用户真的按了确认，不再问第二遍。
+     *
+     * 库和屏幕上那份内存列表要**一起**清：只清库的话，用户回到聊天页仍然看着满屏气泡，
+     * 会以为没清掉；只清内存的话，重启之后它们又全回来了——两种"清了一半"都更像 bug。
+     *
+     * 清空之后**不打一条聊天消息**说明，只写日志：那条说明自己会被写进库，
+     * 于是刚清成 0 条的记录立刻变成 1 条，看着就像没清干净。
+     */
+    fun clearActiveRoleHistory() {
+        val roleId = activeRoleId
+        if (roleId.isBlank()) return
+        val roleName = activeRoleProfile().displayName
+        viewModelScope.launch {
+            runCatching { conversationRepository.clearForRole(roleId) }
+                .onSuccess {
+                    updateState { copy(chatMessages = emptyList(), historyActiveRoleCount = 0) }
+                    addLog("已清空「$roleName」的对话历史")
+                }
+                .onFailure {
+                    addLog("清空「$roleName」的对话历史失败：${it.message ?: it.javaClass.simpleName}")
+                }
+            refreshHistoryCounts()
+        }
+    }
+
+    /** 清空**所有角色**的对话历史。与 [clearActiveRoleHistory] 同样的取舍。 */
+    fun clearAllHistory() {
+        viewModelScope.launch {
+            runCatching { conversationRepository.clearAll() }
+                .onSuccess {
+                    updateState {
+                        copy(chatMessages = emptyList(), historyTotalCount = 0, historyActiveRoleCount = 0)
+                    }
+                    addLog("已清空全部角色的对话历史")
+                }
+                .onFailure {
+                    addLog("清空全部对话历史失败：${it.message ?: it.javaClass.simpleName}")
+                }
+            refreshHistoryCounts()
+        }
+    }
+
     fun checkForAppUpdate(silent: Boolean = false) {
         if (_uiState.value.isDownloadingUpdate) return
         if (appUpdateCheckJob?.isActive == true) {

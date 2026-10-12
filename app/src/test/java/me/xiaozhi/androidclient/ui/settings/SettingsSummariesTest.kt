@@ -88,4 +88,23 @@ class SettingsSummariesTest {
         // 版号是从 BuildConfig 透出来的，这里只是钉住"这条通路没断"。
         assertTrue(aboutSettingsSummary(UiState()).startsWith("v"))
     }
+
+    @Test
+    fun `一条记录都没有时说还没有对话记录，而不是共 0 条`() {
+        assertEquals("还没有对话记录", conversationSettingsSummary(UiState()))
+    }
+
+    @Test
+    fun `有条数时报总数和当前角色的条数`() {
+        val state = UiState(historyTotalCount = 128, historyActiveRoleCount = 12)
+        assertEquals("共 128 条 · 当前角色 12 条", conversationSettingsSummary(state))
+    }
+
+    @Test
+    fun `只有别的角色有记录时，总数照报而当前角色是 0`() {
+        // 最容易写成"总数 > 0 就说有记录"的情况：这时候当前角色其实一条没有，
+        // 清空按钮是灰的。摘要必须把这两个数分开报，用户才明白该切角色还是该清空。
+        val state = UiState(historyTotalCount = 7, historyActiveRoleCount = 0)
+        assertEquals("共 7 条 · 当前角色 0 条", conversationSettingsSummary(state))
+    }
 }

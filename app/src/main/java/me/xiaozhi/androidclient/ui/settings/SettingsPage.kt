@@ -13,5 +13,6 @@ enum class SettingsPage(val title: String) {
     HOME("设置"),
     ROLE("角色设置"),
     DEVICE("设备控制"),
+    CONVERSATION("对话与历史"),
     ABOUT("关于与更新"),
 }

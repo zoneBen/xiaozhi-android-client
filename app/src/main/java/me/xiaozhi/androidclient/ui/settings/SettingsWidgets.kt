@@ -21,6 +21,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -33,6 +34,7 @@ import androidx.compose.ui.unit.dp
 import me.xiaozhi.androidclient.R
 import me.xiaozhi.androidclient.ui.theme.Brand
 import me.xiaozhi.androidclient.ui.theme.BrandSoft
+import me.xiaozhi.androidclient.ui.theme.DangerRed
 import me.xiaozhi.androidclient.ui.theme.Paper
 
 /**
@@ -169,6 +171,13 @@ internal fun SettingsAction(
     subtitle: String,
     actionLabel: String,
     onClick: () -> Unit,
+    /**
+     * false 表示**现在没有可做的事**（比如历史已经是 0 条了，没什么可清空的）。
+     * 按钮变灰而不是整行消失：行消失了用户会以为功能没做，灰着则能看出"是这个条件不满足"。
+     */
+    enabled: Boolean = true,
+    /** 破坏性动作（清空历史）用它：红色文字按钮，和普通动作区分开。 */
+    danger: Boolean = false,
 ) {
     Row(
         modifier = Modifier
@@ -189,7 +198,17 @@ internal fun SettingsAction(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
-        OutlinedButton(onClick = onClick) { Text(actionLabel) }
+        if (danger) {
+            TextButton(onClick = onClick, enabled = enabled) {
+                Text(
+                    text = actionLabel,
+                    color = if (enabled) DangerRed else MaterialTheme.colorScheme.onSurfaceVariant,
+                    fontWeight = FontWeight.Bold,
+                )
+            }
+        } else {
+            OutlinedButton(onClick = onClick, enabled = enabled) { Text(actionLabel) }
+        }
     }
 }
 
