@@ -142,6 +142,14 @@ import me.xiaozhi.androidclient.model.videoPath
 import me.xiaozhi.androidclient.model.canRunWakeWordRecognizer
 import me.xiaozhi.androidclient.ui.MainViewModel
 import me.xiaozhi.androidclient.ui.settings.AboutCard
+import me.xiaozhi.androidclient.ui.chat.AssistantAvatar
+import me.xiaozhi.androidclient.ui.chat.ChatHeaderRow
+import me.xiaozhi.androidclient.ui.chat.ChatHeaderTint
+import me.xiaozhi.androidclient.ui.chat.StatusActiveGreen
+import me.xiaozhi.androidclient.ui.chat.StatusBrandBlue
+import me.xiaozhi.androidclient.ui.chat.StatusInterruptRed
+import me.xiaozhi.androidclient.ui.chat.StatusLamp
+import me.xiaozhi.androidclient.ui.chat.chatStatusOf
 import me.xiaozhi.androidclient.ui.theme.XiaozhiClientTheme
 
 private enum class AppScreen { CHAT, SETTINGS }
@@ -156,15 +164,19 @@ private val ChatBackground = Color(0xFFF1F5FA)
 private val SettingsBackground = Color(0xFFF1F5FA)
 private val UserBubble = Color(0xFF3E7BFA)
 private val AssistantBubble = Color.White
-private val HeaderTint = Color(0xFFE8F0FC)
-private val BrandAccent = Color(0xFF3E7BFA)
 private val BrandAccentSoft = Color(0xFFDCE8FF)
+
+// 下面三个色现在住在 ui/chat 那侧（顶栏和状态灯先用到了它们），这里只留别名。
+// 再写一遍十六进制就会有两份"品牌蓝"，而它们慢慢走偏之后没人看得出来，
+// 只会觉得界面某处不对劲。
+private val HeaderTint = ChatHeaderTint
+private val BrandAccent = StatusBrandBlue
 
 /**
  * 「打断」按钮的红。比 Material 默认的 error 色更饱和、更亮，
  * 因为它是数字人画面上唯一一个需要在「正在播报」的瞬间被一眼找到的控件。
  */
-private val InterruptRed = Color(0xFFE53935)
+private val InterruptRed = StatusInterruptRed
 
 /**
  * 本机没有对应硬件时，设置页那一行降到的透明度。
@@ -873,7 +885,7 @@ private fun StartupLoadingOverlay(state: UiState, onContinueAnyway: (() -> Unit)
                 Text(
                     text = "麦克风：已就绪 ✓",
                     style = MaterialTheme.typography.bodyMedium,
-                    color = Color(0xFF16A34A),
+                    color = StatusActiveGreen,
                 )
             } else {
                 Surface(
@@ -1007,16 +1019,18 @@ private fun ChatScreen(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically,
             ) {
+                // 数字人画面铺在视频上，所以给一个半透明黑底、文字走白色——
+                // 角色画面本身可能是亮色，纯色状态文字压上去读不出来。
                 Surface(
                     color = Color.Black.copy(alpha = 0.42f),
                     shape = RoundedCornerShape(20.dp),
                 ) {
-                    Text(
-                        text = digitalHumanStatusLabel(state),
-                        color = Color.White,
-                        style = MaterialTheme.typography.labelLarge,
-                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 7.dp),
-                    )
+                    Box(modifier = Modifier.padding(horizontal = 14.dp, vertical = 7.dp)) {
+                        StatusLamp(
+                            status = chatStatusOf(state),
+                            onDarkBackdrop = true,
+                        )
+                    }
                 }
                 DigitalHumanControlBar(
                     onShowChat = { showDigitalHuman = false },
@@ -1028,7 +1042,7 @@ private fun ChatScreen(
                 CurrentTasksPanel(tasks = state.scheduledTasks)
             }
         } else {
-            ChatHeaderCard(
+            ChatHeaderRow(
                 state = state,
                 onOpenSettings = onOpenSettings,
             )
@@ -1068,17 +1082,6 @@ private fun ChatScreen(
         )
         }
     }
-}
-
-/** 数字人画面左上角的状态胶囊文案。 */
-private fun digitalHumanStatusLabel(state: UiState): String = when {
-    state.isAssistantSpeaking -> "讲话中"
-    state.isRecording || state.isTurnActive -> "聆听中"
-    state.connectionStatus == ConnectionStatus.CONNECTED -> "待机中"
-    state.connectionStatus == ConnectionStatus.FETCHING_CONFIG -> "获取配置中"
-    state.connectionStatus == ConnectionStatus.CONNECTING -> "连接中"
-    state.connectionStatus == ConnectionStatus.FAILED -> "连接失败"
-    else -> "未连接"
 }
 
 /**
@@ -1717,71 +1720,6 @@ private fun AppUpdateCard(
 }
 
 @Composable
-private fun ChatHeaderCard(
-    state: UiState,
-    onOpenSettings: () -> Unit,
-) {
-    val headline = when {
-        state.isAssistantSpeaking -> "讲话中"
-        state.isRecording -> "聆听中"
-        state.isTurnActive -> "聆听中"
-        state.connectionStatus == ConnectionStatus.CONNECTED -> "待机中"
-        state.isSilentTransportRecovery -> "待机中"
-        state.activationPending -> "待激活"
-        state.connectionStatus == ConnectionStatus.FETCHING_CONFIG -> "获取配置中"
-        state.connectionStatus == ConnectionStatus.CONNECTING -> "连接中"
-        state.connectionStatus == ConnectionStatus.FAILED -> "连接失败"
-        else -> "未连接"
-    }
-
-    Surface(
-        color = Color.White,
-        shape = RoundedCornerShape(28.dp),
-        shadowElevation = 2.dp,
-    ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .background(HeaderTint)
-                .padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp),
-        ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Row(
-                    horizontalArrangement = Arrangement.spacedBy(12.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    AssistantAvatar(
-                        avatarPath = state.activeRoleAvatarPath,
-                        fallbackText = state.activeRoleName.takeLast(1).ifBlank { "智" },
-                        modifier = Modifier.size(56.dp),
-                    )
-                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                        Text(
-                            text = "语音 AI 交互",
-                            style = MaterialTheme.typography.titleLarge,
-                            fontWeight = FontWeight.Bold,
-                        )
-                        Text(
-                            text = headline,
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-                }
-                IconButton(onClick = onOpenSettings) {
-                    Icon(Icons.Default.Settings, contentDescription = "打开设置")
-                }
-            }
-        }
-    }
-}
-
-@Composable
 private fun RoleProfilesCard(
     state: UiState,
     onSelectRole: (String) -> Unit,
@@ -2356,45 +2294,6 @@ private fun PhotoBubble(photo: File) {
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
-            }
-        }
-    }
-}
-
-@Composable
-private fun AssistantAvatar(
-    avatarPath: String,
-    fallbackText: String = "智",
-    modifier: Modifier = Modifier,
-    onClick: (() -> Unit)? = null,
-) {
-    val containerModifier = if (onClick != null) {
-        modifier.clickable(onClick = onClick)
-    } else {
-        modifier
-    }
-
-    Surface(
-        modifier = containerModifier,
-        color = MaterialTheme.colorScheme.secondaryContainer,
-        shape = CircleShape,
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.secondary.copy(alpha = 0.25f)),
-    ) {
-        if (avatarPath.isNotBlank() && File(avatarPath).exists()) {
-            AsyncImage(
-                model = File(avatarPath),
-                contentDescription = "小智头像",
-                modifier = Modifier.fillMaxSize(),
-                contentScale = ContentScale.Crop,
-            )
-        } else {
-            Box(contentAlignment = Alignment.Center, modifier = Modifier.fillMaxSize()) {
-                Text(
-                    text = fallbackText,
-                    style = MaterialTheme.typography.labelLarge,
-                    fontWeight = FontWeight.Bold,
-                    color = MaterialTheme.colorScheme.onSecondaryContainer,
-                )
             }
         }
     }
