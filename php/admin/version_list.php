@@ -29,6 +29,17 @@ if (admin_is_post()) {
     if ($id > 0 && $action === 'toggle') {
         $enabled = ((int) ($_POST['enabled'] ?? 0) === 1) ? 1 : 0;
         if ($enabled === 1) {
+            // 发布前的最后一道闸门：sha256 为空的记录，客户端会**把整个包下载完再拒绝安装**
+            // （AppUpdateManager.verifyDownloadedApk 把空哈希当作「拒绝」，不是「跳过」）。
+            // 编辑页保存时已经拦过一次，但这里是一键发布，绕得过去，所以两边都要拦。
+            $stmt = $db->prepare('SELECT `sha256` FROM `xiaozhi_android_client_app_version` WHERE `id` = ? LIMIT 1');
+            $stmt->execute([$id]);
+            $sha256 = $stmt->fetchColumn();
+            if (!is_string($sha256) || trim($sha256) === '') {
+                admin_flash('这条版本没有 sha256，客户端下载后会拒绝安装，所以不能发布。请先「编辑」补上 sha256。', 'err');
+                admin_redirect('version_list.php');
+            }
+
             // 首次发布补上发布时间；已发布过的保留原时间。
             $stmt = $db->prepare(
                 'UPDATE `xiaozhi_android_client_app_version`
@@ -124,6 +135,9 @@ admin_page_header('版本发布');
                 <span class="badge on">已发布</span>
               <?php else: ?>
                 <span class="badge off">草稿</span>
+              <?php endif; ?>
+              <?php if ($sha === ''): ?>
+                <span class="badge warn" title="客户端拿不到校验值，下载完会拒绝安装">缺 sha256</span>
               <?php endif; ?>
             </td>
             <td class="mono"><?= e($size > 0 ? admin_human_bytes($size) : '—') ?></td>

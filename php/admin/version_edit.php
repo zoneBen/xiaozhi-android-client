@@ -23,6 +23,17 @@ declare(strict_types=1);
  * 能挡住「改个后缀就传上来」。但**签名**这关服务端管不了：客户端 pin 了
  * EXPECTED_SIGNER_SHA256，用别的证书签的包一律拒装。这个必须靠人工在上传前保证，
  * 页面上也给了醒目提示。
+ *
+ * ## sha256：走外链时必须手填
+ *
+ * 上传 APK 时服务端自己算 sha256；走外链时文件不在我们手上，只能由运营把值填进来。
+ * 但它是**必填**的：客户端 AppUpdateManager.verifyDownloadedApk() 里「sha256 为空」
+ * 的含义是**拒绝安装**，不是「跳过这一项校验」。所以：
+ *
+ *   - 表单里必须有这个字段（外链分支以前无条件把 sha256 置空，等于外链发版永远装不上）；
+ *   - 状态是「发布」时空值直接报错 —— 一条 sha256 为空的已发布记录，客户端会
+ *     下载完整个 APK 再拒装，配上 force_update 就是用户卡死在一个装不上的版本上。
+ *     草稿允许留空，那是「哈希还没算好」的合理中间态。
  */
 
 require_once __DIR__ . '/lib.php';
@@ -56,6 +67,7 @@ $form = [
     'min_support_version' => (string) ($existing['min_support_version'] ?? '1'),
     'download_url'        => (string) ($existing['download_url'] ?? ''),
     'release_notes'       => (string) ($existing['release_notes'] ?? ''),
+    'sha256'              => strtolower((string) ($existing['sha256'] ?? '')),
     'force_update'        => (int) ($existing['force_update'] ?? 0),
     'enabled'             => (int) ($existing['enabled'] ?? 1),
 ];
@@ -73,6 +85,9 @@ if (admin_is_post()) {
     $form['release_notes'] = admin_clip_bytes(trim((string) ($_POST['release_notes'] ?? '')), 65535);
     $form['version_code']  = (string) max(0, (int) ($_POST['version_code'] ?? 0));
     $form['min_support_version'] = (string) max(0, (int) ($_POST['min_support_version'] ?? 1));
+    // sha256：上传 APK 时下面会用服务端实算出来的值覆盖它，所以这个输入只在
+    // 「手填外链」时起作用（也可能用于手工订正一条老记录的哈希）。
+    $form['sha256']        = strtolower(trim((string) ($_POST['sha256'] ?? '')));
     $form['force_update']  = ((int) ($_POST['force_update'] ?? 0) === 1) ? 1 : 0;
     $form['enabled']       = ((int) ($_POST['enabled'] ?? 0) === 1) ? 1 : 0;
     $externalUrl           = admin_clip(trim((string) ($_POST['download_external'] ?? '')), 512);
@@ -98,10 +113,19 @@ if (admin_is_post()) {
         $form['min_support_version'] = '1';
     }
 
+    // sha256 的格式先卡住。填错的现象**不是**表单报错，而是「客户端下载完整个包
+    // 才说 SHA-256 校验失败、然后删掉重来」，在设备上很难看出是后台填错了。
+    if ($form['sha256'] !== '' && preg_match('/^[0-9a-f]{64}$/', $form['sha256']) !== 1) {
+        $errors[] = 'sha256 必须是 64 位十六进制（0-9a-f）。'
+            . 'Windows 上可以这样算：certutil -hashfile 安装包.apk SHA256';
+    }
+
     // 下载地址：上传优先于外链；两者都没动时，编辑态保留原地址、新增态报错。
     $finalDownload = (string) $form['download_url'];
     $finalSize     = isset($existing['file_size']) ? (int) $existing['file_size'] : null;
-    $finalSha      = $existing['sha256'] ?? null;
+    // sha256 以表单里的值为准（表单已用库里现有的值预填）：这样「手填外链」和
+    // 「订正一条老记录的哈希」都能走通，上传 APK 时下面再用实算值覆盖。
+    $finalSha      = ($form['sha256'] !== '') ? $form['sha256'] : null;
     $oldApkToDelete = null;
     $newlyUploadedApk = null;
 
@@ -129,8 +153,9 @@ if (admin_is_post()) {
         }
     } elseif ($externalUrl !== '') {
         $finalDownload  = $externalUrl;
+        // 外链拿不到文件，大小算不出来（客户端也不读它），但 sha256 必须由运营填 ——
+        // 这就是表单里那个字段存在的理由，不能跟着 file_size 一起清空。
         $finalSize      = null;
-        $finalSha       = null;
         $oldApkToDelete = (string) $form['download_url'];
     }
 
@@ -139,6 +164,17 @@ if (admin_is_post()) {
     }
 
     $form['download_url'] = $finalDownload;
+    // 回显用「最终会入库的那个值」，而不是用户敲进来的原文 —— 刚上传完 APK 时，
+    // 页面上应该显示服务端算出来的哈希。
+    $form['sha256'] = (string) ($finalSha ?? '');
+
+    // 发布态必须有 sha256：客户端那边空哈希 == 下载完拒绝安装（不是跳过校验），
+    // 而这条记录一旦发出去就立刻对全网生效，配上 force_update 更会让用户卡在一个
+    // 装不上的版本上。草稿留空是允许的 —— 「哈希还没算好」是合理的中间态。
+    if ($form['enabled'] === 1 && $finalSha === null) {
+        $errors[] = '状态是「发布」时必须填 sha256（走外链要自己算；上传 APK 会自动填）。'
+            . '缺了它客户端会把整个包下载完再拒绝安装。想先存着就选「草稿」。';
+    }
 
     if ($errors === []) {
         $now         = zx_now();
@@ -341,6 +377,18 @@ admin_page_header($isEdit ? '编辑版本' : '新增版本', 'versions');
              placeholder="留空则不动；填了就用外链">
     </label>
   </div>
+
+  <label class="field">
+    <span>sha256（上传 APK 会自动算；填外链 URL 时必须自己填）</span>
+    <input type="text" name="sha256" maxlength="64" class="mono"
+           value="<?= e($form['sha256']) ?>" placeholder="64 位十六进制小写">
+    <small>
+      客户端下载完会拿它逐字节比对，<strong>空着不是「跳过这项校验」，是「下载完拒绝安装」</strong>。
+      算哈希：Windows 用 <span class="mono">certutil -hashfile 安装包.apk SHA256</span>，
+      Linux / macOS 用 <span class="mono">sha256sum 安装包.apk</span>。
+      <strong>换了下载地址就必须重新算一次</strong> —— 沿用旧哈希的现象是客户端报「SHA-256 校验失败」。
+    </small>
+  </label>
 
   <label class="field">
     <span>状态</span>
