@@ -71,6 +71,10 @@ class ScheduledTaskRepository(
 
     suspend fun enqueue(execution: TaskExecutionEntity): Long = executionDao.insert(execution)
 
+    /** 这个发生点是不是已经有记录了。补跑幂等靠它，详见 [TaskExecutionDao.countAt]。 */
+    suspend fun hasExecutionAt(taskId: Long, scheduledAtEpochMs: Long): Boolean =
+        executionDao.countAt(taskId, scheduledAtEpochMs) > 0
+
     /** 原子认领，返回 true = 抢到了。返回 false 表示别的消费者先拿走了。 */
     suspend fun claim(executionId: Long): Boolean = executionDao.claimPending(executionId) > 0
 

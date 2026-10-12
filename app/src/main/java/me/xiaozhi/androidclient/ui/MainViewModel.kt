@@ -32,6 +32,7 @@ import me.xiaozhi.androidclient.data.db.HardwareProbeEntity
 import me.xiaozhi.androidclient.data.toProbeCsv
 import me.xiaozhi.androidclient.data.toProbeFacings
 import me.xiaozhi.androidclient.data.RoleProfileRepository
+import me.xiaozhi.androidclient.data.ScheduledTaskRepository
 import me.xiaozhi.androidclient.data.StoredConfig
 import me.xiaozhi.androidclient.device.BodyGuargzController
 import me.xiaozhi.androidclient.device.SystemVolumeController
@@ -70,12 +71,14 @@ import me.xiaozhi.androidclient.scheduling.ReminderConversationState
 import me.xiaozhi.androidclient.scheduling.ReminderDeliveryAction
 import me.xiaozhi.androidclient.scheduling.ReminderDeliveryPolicy
 import me.xiaozhi.androidclient.scheduling.ReminderScheduler
+import me.xiaozhi.androidclient.scheduling.ScheduledTaskRecovery
 import me.xiaozhi.androidclient.scheduling.ReminderKind
 import me.xiaozhi.androidclient.scheduling.ScheduledReminder
 import me.xiaozhi.androidclient.scheduling.SupervisionPhase
 import me.xiaozhi.androidclient.scheduling.SupervisionPolicy
 import me.xiaozhi.androidclient.scheduling.SupervisionVisionDecisionParser
 import me.xiaozhi.androidclient.scheduling.SupervisionVisionStatus
+import me.xiaozhi.androidclient.scheduling.TaskAlarmScheduler
 import okhttp3.OkHttpClient
 import org.json.JSONObject
 
@@ -164,6 +167,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val roleProfileRepository = RoleProfileRepository(application)
     private val conversationRepository = ConversationRepository(application)
     private val hardwareProbeRepository = HardwareProbeRepository(application)
+    private val scheduledTaskRepository = ScheduledTaskRepository(application)
+    private val taskAlarmScheduler = TaskAlarmScheduler(application)
 
     /** 距上次 [ConversationRepository.pruneRole] 又写了几条消息，见 [persistMessage]。 */
     private var messagesSincePrune = 0
@@ -364,6 +369,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         refreshHardwareProbe(force = false)
         nanoSerialBridge.start()
         reminderScheduler.start()
+        // 冷启动补跑 + 重排定时任务闹钟。
+        //
+        // 开机广播那条路只覆盖「真关机了」。这台设备内存小、进程常被系统回收，而被回收
+        // 之后闹钟可能压根没响——开机广播一次也不会来。这条 init 路径才是常态那条。
+        // 两处调同一个函数、同一套幂等键，重复调用是安全的（见 TaskCatchUpPolicy）。
+        viewModelScope.launch {
+            runCatching { ScheduledTaskRecovery.run(scheduledTaskRepository, taskAlarmScheduler) }
+                .onFailure { addLog("定时任务恢复失败：${it.message.orEmpty()}") }
+        }
         viewModelScope.launch {
             delay(AUTO_START_DELAY_MS)
             networkTimeSynchronizer.awaitValidSystemTime(::addLog)

@@ -51,6 +51,16 @@ interface TaskExecutionDao {
     @Query("DELETE FROM task_executions WHERE taskId = :taskId")
     suspend fun clearForTask(taskId: Long)
 
+    /**
+     * 这一个发生点是不是已经有记录了。
+     *
+     * 补跑幂等的键：闹钟 receiver 与开机补跑都会往这张表落行，而两者之间有一条真实窗口
+     * （落完 `PENDING` 还没推进 `nextFireAt` 就被杀进程），不查一下就会同一件事做两遍。
+     * 用 `scheduledAtEpochMs`（对这个任务而言唯一标识「哪一次」）而不是 `id`，正是这个意思。
+     */
+    @Query("SELECT COUNT(*) FROM task_executions WHERE taskId = :taskId AND scheduledAtEpochMs = :scheduledAt")
+    suspend fun countAt(taskId: Long, scheduledAt: Long): Int
+
     /** 保留策略：只留最新 [cap] 条。与对话历史同理，是兜底不是回滚。 */
     @Query(
         "DELETE FROM task_executions WHERE id NOT IN (" +

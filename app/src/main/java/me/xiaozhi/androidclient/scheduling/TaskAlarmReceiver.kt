@@ -7,7 +7,6 @@ import android.util.Log
 import kotlinx.coroutines.runBlocking
 import me.xiaozhi.androidclient.MainActivity
 import me.xiaozhi.androidclient.data.ScheduledTaskRepository
-import me.xiaozhi.androidclient.data.db.TaskExecutionEntity
 import java.time.ZoneId
 
 /**
@@ -69,20 +68,7 @@ class TaskAlarmReceiver : BroadcastReceiver() {
         val scheduledAt = task.nextFireAtEpochMs ?: now
         runBlocking {
             repository.enqueue(
-                TaskExecutionEntity(
-                    taskId = task.id,
-                    taskTitle = task.title,
-                    action = task.action,
-                    scheduledAtEpochMs = scheduledAt,
-                    firedAtEpochMs = now,
-                    status = TaskRunStatus.PENDING.name,
-                    outcome = null,
-                    isCatchUp = false,
-                    attempts = 0,
-                    nextAttemptAtEpochMs = null,
-                    detail = null,
-                    createdAtEpochMs = now,
-                ),
+                pendingExecutionOf(task, scheduledAt, now, isCatchUp = false),
             )
         }
 
