@@ -1,15 +1,21 @@
 package me.xiaozhi.androidclient.ui.settings
 
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
@@ -20,8 +26,11 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import me.xiaozhi.androidclient.R
 import me.xiaozhi.androidclient.ui.theme.Brand
 import me.xiaozhi.androidclient.ui.theme.BrandSoft
 import me.xiaozhi.androidclient.ui.theme.Paper
@@ -52,6 +61,74 @@ internal fun SettingsCard(content: @Composable ColumnScope.() -> Unit) {
         shadowElevation = 1.dp,
     ) {
         Column(modifier = Modifier.fillMaxWidth(), content = content)
+    }
+}
+
+/**
+ * 一屏设置的外壳：底色、系统栏留白、上下滚动、卡片间距。
+ *
+ * 每一屏都用它，是为了让「返回时页面不跳」这件事自动成立——只要所有页的外边距
+ * 都由同一个函数给出，就不可能出现在某一页上多了 18dp 的情况。
+ */
+@Composable
+internal fun SettingsPageScaffold(
+    padding: PaddingValues,
+    content: @Composable ColumnScope.() -> Unit,
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Paper)
+            .padding(padding)
+            .verticalScroll(rememberScrollState())
+            .padding(horizontal = 16.dp, vertical = 18.dp),
+        verticalArrangement = Arrangement.spacedBy(18.dp),
+        content = content,
+    )
+}
+
+/**
+ * 设置首页的一行：图标 + 名称 + 当前值摘要 + `›`。
+ *
+ * [summary] 不是装饰：设置首页把每一项现在的状态摊开，用户才不必为了确认
+ * 「拍照到底关没关」而挨个点进去看。留空则不占位。
+ */
+@Composable
+internal fun SettingsNavRow(
+    icon: String,
+    title: String,
+    summary: String,
+    onClick: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .padding(horizontal = 16.dp, vertical = 16.dp),
+        horizontalArrangement = Arrangement.spacedBy(14.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(text = icon)
+        Column(
+            modifier = Modifier.weight(1f),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            Text(text = title, fontWeight = FontWeight.SemiBold)
+            if (summary.isNotBlank()) {
+                Text(
+                    text = summary,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+        }
+        Icon(
+            painter = painterResource(R.drawable.ic_chevron_right),
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
     }
 }
 

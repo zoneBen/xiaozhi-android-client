@@ -5,10 +5,12 @@ import android.content.Context
 import android.graphics.BitmapFactory
 import android.os.Build
 import android.widget.Toast
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
@@ -18,7 +20,10 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -37,14 +42,12 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import me.xiaozhi.androidclient.R
+import me.xiaozhi.androidclient.model.UiState
 
 /**
  * 「关于」卡片：作者 / 微信 / 交流群 / 开源许可。
  *
- * 与 [me.xiaozhi.androidclient.MainActivity] 里的 `AppUpdateCard` 配对使用——
- * 版本号和「检查更新」在那边，这里只放**人与许可**，刻意不重复显示版本号。
- *
- * 这里的署名是**双署名**，不是客套：本项目是 MIT 的衍生物，MIT 的条件是
+ * 署名是**双署名**，不是客套：本项目是 MIT 的衍生物，MIT 的条件是
  * 「The above copyright notice and this permission notice shall be included in all
  * copies or substantial portions of the Software」。只写本定制版作者、抹掉上游，
  * 等于直接违反许可证。所以上游项目、上游版权、本定制版修改三者都要在。
@@ -94,8 +97,141 @@ private val MIT_LICENSE_TEXT = """
     SOFTWARE.
 """.trimIndent()
 
+/**
+ * 「关于与更新」页：版本与更新在最上，人与许可在下面。
+ *
+ * 合并成**一屏**而不是两屏：它们都是「关于这个 App 本身」的信息，用户想找作者的时候
+ * 往往正顺手想知道自己装的是哪一版。分成两屏反而要多点一次。
+ */
 @Composable
-fun AboutCard() {
+internal fun AboutScreen(
+    state: UiState,
+    padding: PaddingValues,
+    onCheckForUpdate: () -> Unit,
+    onStartUpdate: () -> Unit,
+) {
+    SettingsPageScaffold(padding) {
+        AppUpdateCard(
+            state = state,
+            onCheckForUpdate = onCheckForUpdate,
+            onStartUpdate = onStartUpdate,
+        )
+        AboutCard()
+    }
+}
+
+/**
+ * 版本与「检查更新」。
+ *
+ * 从 [me.xiaozhi.androidclient.MainActivity] 原样搬来，逻辑一行没动。
+ * 版本号读的是 `BuildConfig` 透出来的 [UiState.appVersionName] / [UiState.appVersionCode]，
+ * **不是字面量**——XiaozhiModels.kt 里记着一次漏改版本号的事故，不要重蹈。
+ */
+@Composable
+private fun AppUpdateCard(
+    state: UiState,
+    onCheckForUpdate: () -> Unit,
+    onStartUpdate: () -> Unit,
+) {
+    Surface(
+        color = Color.White,
+        shape = RoundedCornerShape(24.dp),
+        shadowElevation = 2.dp,
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(20.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp),
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column {
+                    Text(
+                        text = "系统与软件更新",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold,
+                    )
+                    Text(
+                        text = "当前版本：v${state.appVersionName} (Build ${state.appVersionCode})",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Button(
+                    onClick = onCheckForUpdate,
+                    enabled = !state.isCheckingUpdate && !state.isDownloadingUpdate,
+                ) {
+                    Text(if (state.isCheckingUpdate) "检查中..." else "检查更新")
+                }
+            }
+
+            if (state.updateCheckStatus.isNotBlank()) {
+                Text(
+                    text = state.updateCheckStatus,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.primary,
+                )
+            }
+
+            if (state.availableUpdate != null) {
+                Surface(
+                    color = Color(0xFFF0FDF4),
+                    shape = RoundedCornerShape(12.dp),
+                    border = BorderStroke(1.dp, Color(0xFFBBF7D0)),
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Column(
+                        modifier = Modifier.padding(14.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        Text(
+                            text = "🎉 发现新版本 v${state.availableUpdate.versionName}",
+                            fontWeight = FontWeight.Bold,
+                            color = Color(0xFF166534),
+                            style = MaterialTheme.typography.bodyMedium,
+                        )
+                        if (state.availableUpdate.releaseNotes.isNotBlank()) {
+                            Text(
+                                text = state.availableUpdate.releaseNotes,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = Color(0xFF15803D),
+                            )
+                        }
+
+                        if (state.isDownloadingUpdate) {
+                            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                LinearProgressIndicator(
+                                    progress = { state.downloadProgressPercent / 100f },
+                                    modifier = Modifier.fillMaxWidth(),
+                                )
+                                Text(
+                                    text = "下载更新中 ${state.downloadProgressPercent}%",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = Color(0xFF166534),
+                                )
+                            }
+                        } else {
+                            Button(
+                                onClick = onStartUpdate,
+                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF16A34A)),
+                                modifier = Modifier.fillMaxWidth(),
+                            ) {
+                                Text("立即下载并安装更新")
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun AboutCard() {
     val context = LocalContext.current
     var showWechat by remember { mutableStateOf(false) }
     var showFullLicense by remember { mutableStateOf(false) }

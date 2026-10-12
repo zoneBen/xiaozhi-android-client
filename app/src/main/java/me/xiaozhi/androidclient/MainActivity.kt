@@ -15,6 +15,7 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.drawable.ColorDrawable
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -141,13 +142,8 @@ import me.xiaozhi.androidclient.model.hasCompleteDigitalHuman
 import me.xiaozhi.androidclient.model.videoPath
 import me.xiaozhi.androidclient.model.canRunWakeWordRecognizer
 import me.xiaozhi.androidclient.ui.MainViewModel
-import me.xiaozhi.androidclient.ui.settings.AboutCard
-import me.xiaozhi.androidclient.ui.settings.SettingsAction
-import me.xiaozhi.androidclient.ui.settings.SettingsCard
-import me.xiaozhi.androidclient.ui.settings.SettingsChoice
-import me.xiaozhi.androidclient.ui.settings.SettingsStatus
-import me.xiaozhi.androidclient.ui.settings.SettingsSwitch
-import me.xiaozhi.androidclient.ui.settings.StatusTag
+import me.xiaozhi.androidclient.ui.settings.SettingsHostScreen
+import me.xiaozhi.androidclient.ui.settings.SettingsPage
 import me.xiaozhi.androidclient.ui.chat.AssistantAvatar
 import me.xiaozhi.androidclient.ui.chat.ChatHeaderRow
 import me.xiaozhi.androidclient.ui.chat.chatStatusOf
@@ -330,6 +326,10 @@ private fun XiaozhiApp() {
     }
     val lifecycleOwner = LocalLifecycleOwner.current
     var currentScreen by rememberSaveable { mutableStateOf(AppScreen.CHAT) }
+
+    // 设置里当前停在哪一屏。与 currentScreen 并列地放在这儿，是因为顶栏和物理返回键
+    // 都要用它（标题跟着它变、返回键先退子页再退聊天页），放在设置内部就传不出来了。
+    var settingsPage by rememberSaveable { mutableStateOf(SettingsPage.HOME) }
     var isForeground by remember { mutableStateOf(true) }
     var pendingAudioAction by remember { mutableStateOf<PendingAudioAction?>(null) }
     var playbackCooldownActive by remember { mutableStateOf(false) }
@@ -504,6 +504,7 @@ private fun XiaozhiApp() {
                             "已请求打断播报"
                         }
                         "settings" -> {
+                            settingsPage = SettingsPage.HOME
                             currentScreen = AppScreen.SETTINGS
                             "已切到设置"
                         }
@@ -548,8 +549,14 @@ private fun XiaozhiApp() {
     XiaozhiScreen(
         state = latestState,
         currentScreen = currentScreen,
-        onOpenSettings = { currentScreen = AppScreen.SETTINGS },
+        settingsPage = settingsPage,
+        // 每次打开设置都从首页进。停在昨天那个子页会让人以为设置页只有一个页面。
+        onOpenSettings = {
+            settingsPage = SettingsPage.HOME
+            currentScreen = AppScreen.SETTINGS
+        },
         onBackToChat = { currentScreen = AppScreen.CHAT },
+        onNavigateSettings = { settingsPage = it },
         onPickRoleAvatar = { roleId ->
             avatarRoleId = roleId
             avatarPickerLauncher.launch("image/*")
@@ -673,8 +680,10 @@ private fun logsToJson(state: UiState, since: Int): String {
 private fun XiaozhiScreen(
     state: UiState,
     currentScreen: AppScreen,
+    settingsPage: SettingsPage,
     onOpenSettings: () -> Unit,
     onBackToChat: () -> Unit,
+    onNavigateSettings: (SettingsPage) -> Unit,
     onPickRoleAvatar: (String) -> Unit,
     onPickRolePortrait: (String) -> Unit,
     onPickRoleVideo: (String, DigitalHumanSlot) -> Unit,
@@ -754,15 +763,44 @@ private fun XiaozhiScreen(
     }
     val showBootCover = checksPassed && !startupOverlayDismissed && !bootCoverReleased
 
+    // 物理返回键和左上角的返回箭头走同一条路：子页 → 设置首页 → 聊天页。
+    // 不接管的话，在子页按返回键会一步退回聊天页，和用户刚点过的那个箭头行为相反——
+    // 同一个动作两个结果，用户只会觉得"返回键有时候管用有时候不管用"。
+    BackHandler(enabled = currentScreen == AppScreen.SETTINGS) {
+        if (settingsPage == SettingsPage.HOME) {
+            onBackToChat()
+        } else {
+            onNavigateSettings(SettingsPage.HOME)
+        }
+    }
+
     Scaffold(
         containerColor = if (currentScreen == AppScreen.SETTINGS) SettingsBackground else ChatBackground,
         topBar = {
             if (currentScreen == AppScreen.SETTINGS) {
                 TopAppBar(
-                    title = { Text("角色设置", fontWeight = FontWeight.SemiBold) },
+                    title = { Text(settingsPage.title, fontWeight = FontWeight.SemiBold) },
                     navigationIcon = {
-                        IconButton(onClick = onBackToChat) {
-                            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回聊天")
+                        IconButton(
+                            onClick = {
+                                // 逐级退回：子页 → 设置首页 → 聊天页。物理返回键走同一条路
+                                // （见下面的 BackHandler），否则会出现"按返回箭头回首页、
+                                // 按系统返回键直接退出设置"这种不一致。
+                                if (settingsPage == SettingsPage.HOME) {
+                                    onBackToChat()
+                                } else {
+                                    onNavigateSettings(SettingsPage.HOME)
+                                }
+                            },
+                        ) {
+                            Icon(
+                                Icons.AutoMirrored.Filled.ArrowBack,
+                                contentDescription = if (settingsPage == SettingsPage.HOME) {
+                                    "返回聊天"
+                                } else {
+                                    "返回设置"
+                                },
+                            )
                         }
                     },
                     colors = TopAppBarDefaults.topAppBarColors(containerColor = Color.White),
@@ -798,9 +836,11 @@ private fun XiaozhiScreen(
                         onAbortSpeaking = onAbortSpeaking,
                     )
 
-                    AppScreen.SETTINGS -> SettingsScreen(
-                        state = state,
+                    AppScreen.SETTINGS -> SettingsHostScreen(
+                        page = settingsPage,
                         padding = padding,
+                        onNavigate = onNavigateSettings,
+                        state = state,
                         onSelectRole = onSelectRole,
                         onPickRoleAvatar = onPickRoleAvatar,
                         onPickRolePortrait = onPickRolePortrait,
@@ -1451,546 +1491,6 @@ private fun formatTaskCountdown(totalSeconds: Long): String {
         hours > 0 -> "%d:%02d:%02d".format(hours, minutes, seconds)
         else -> "%02d:%02d".format(minutes, seconds)
     }
-}
-
-@Composable
-private fun SettingsScreen(
-    state: UiState,
-    padding: PaddingValues,
-    onSelectRole: (String) -> Unit,
-    onPickRoleAvatar: (String) -> Unit,
-    onPickRolePortrait: (String) -> Unit,
-    onPickRoleVideo: (String, DigitalHumanSlot) -> Unit,
-    onAddRole: (String, String) -> Unit,
-    onUpdateRole: (String, String, String) -> Unit,
-    onDeleteRole: (String) -> Unit,
-    onCheckForUpdate: () -> Unit,
-    onStartUpdate: () -> Unit,
-    onStartUpload: (String, UploadTarget) -> Unit,
-    onClearRoleAvatar: (String) -> Unit,
-    onClearRolePortrait: (String) -> Unit,
-    onClearRoleVideo: (String, DigitalHumanSlot) -> Unit,
-    onDeviceControlEnabledChanged: (Boolean) -> Unit,
-    onHardwareControlEnabledChanged: (Boolean) -> Unit,
-    onCameraFacingChanged: (CameraFacing) -> Unit,
-    onRecheckHardware: () -> Unit,
-) {
-    val scrollState = rememberScrollState()
-
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(SettingsBackground)
-            .padding(padding)
-            .verticalScroll(scrollState)
-            .padding(horizontal = 16.dp, vertical = 18.dp),
-        verticalArrangement = Arrangement.spacedBy(18.dp),
-    ) {
-        RoleProfilesCard(
-            state = state,
-            onSelectRole = onSelectRole,
-            onPickRoleAvatar = onPickRoleAvatar,
-            onPickRolePortrait = onPickRolePortrait,
-            onPickRoleVideo = onPickRoleVideo,
-            onStartUpload = onStartUpload,
-            onClearRoleAvatar = onClearRoleAvatar,
-            onClearRolePortrait = onClearRolePortrait,
-            onClearRoleVideo = onClearRoleVideo,
-            onAddRole = onAddRole,
-            onUpdateRole = onUpdateRole,
-            onDeleteRole = onDeleteRole,
-        )
-
-        AppUpdateCard(
-            state = state,
-            onCheckForUpdate = onCheckForUpdate,
-            onStartUpdate = onStartUpdate,
-        )
-
-        AboutCard()
-
-        DeviceControlCard(
-            state = state,
-            onDeviceControlEnabledChanged = onDeviceControlEnabledChanged,
-            onHardwareControlEnabledChanged = onHardwareControlEnabledChanged,
-            onCameraFacingChanged = onCameraFacingChanged,
-            onRecheckHardware = onRecheckHardware,
-        )
-    }
-}
-
-/**
- * 设备控制卡片：**两个**开关，加一行本机硬件的自检结果。
- *
- * ## 为什么是两个开关（2026-10-12 拆分）
- *
- * 原先只有一个总开关，把"硬件事实"和"用户意愿"混在了一起。实测暴露两件事：
- *
- *  1. 在没认出云台和补光灯的机器上（比如现在这台 OnePlus），它照样显示为**打开**，
- *     可实际它只等于"能调音量"——**开关在撒谎**；
- *  2. 用户为了关掉云台，得连媒体音量一起牺牲，而音量任何 Android 设备都有。
- *
- * 所以按「通用 / 硬件强相关」分成两组，并让硬件那个开关在**本机没这个硬件时置灰**——
- * 留着能点等于骗用户，打开也没东西可控制。
- *
- * ## 为什么要把自检结果摆到界面上
- *
- * 云台和补光灯都是靠厂商挂在 `PowerManager` 上的扩展方法反射调用的（见
- * `BodyGuargzController`），这台机器认不认只能实测。把结论写在这儿，现场的人一眼就能
- * 分清"是功能没开"还是"这台机器压根没有这个硬件"——否则只会看到"叫它转它不转"，
- * 然后以为 App 坏了。
- */
-@Composable
-private fun DeviceControlCard(
-    state: UiState,
-    onDeviceControlEnabledChanged: (Boolean) -> Unit,
-    onHardwareControlEnabledChanged: (Boolean) -> Unit,
-    onCameraFacingChanged: (CameraFacing) -> Unit,
-    onRecheckHardware: () -> Unit,
-) {
-    SettingsCard {
-        SettingsSwitch(
-            icon = "📷",
-            title = "拍照与音量",
-            subtitle = "允许小智拍照看画面、调节媒体音量，比如「看看这是什么」「声音小一点」。" +
-                "关掉后小智不能拍照，定时监督也不再拍照核对，只会照常提醒你。",
-            checked = state.deviceControlEnabled,
-            onCheckedChange = onDeviceControlEnabledChanged,
-        )
-
-        // 前置 / 后置。本机只有一个朝向时不显示——没得选的选择器只是在浪费用户的时间。
-        if (state.cameraFacingChoices.size > 1) {
-            HorizontalDivider()
-            SettingsChoice(
-                icon = "🔄",
-                title = "用哪个摄像头",
-                subtitle = "本机有${state.cameraFacingChoices.joinToString("和") { it.label }}摄像头。" +
-                    "接上 USB 摄像头时优先用它。",
-                options = state.cameraFacingChoices.map { it.label to (it == state.cameraFacing) },
-                onSelect = { index -> onCameraFacingChanged(state.cameraFacingChoices[index]) },
-            )
-        }
-
-        HorizontalDivider()
-        SettingsSwitch(
-            icon = "🕹️",
-            title = "云台与补光灯",
-            // 说「没认出」而不是「没有」：这里证的是**厂商标商接口在不在**，
-            // 不是灯和电机在不在——一台机器可能接口在、硬件不在。写「没有」是把话说满了。
-            subtitle = if (state.hardwareControlAvailable) {
-                "允许小智转动摄像头云台、开关补光灯和红外灯，比如「左转」「打开灯光」。" +
-                    "关掉后会立刻关灯并把云台停住。"
-            } else {
-                "本机没认出云台和补光灯，这个开关在这里用不上。"
-            },
-            // 没硬件时显示的是**实际生效状态**（关），不是用户存的那个值（开）；
-            // 存的值不动，将来插到真有云台的板子上照样是开的。
-            checked = state.hardwareControlEnabled && state.hardwareControlAvailable,
-            onCheckedChange = onHardwareControlEnabledChanged,
-            enabled = state.hardwareControlAvailable,
-        )
-
-        HorizontalDivider()
-        SettingsStatus(
-            icon = if (state.deviceControlEnabled || state.hardwareControlEnabled) "🔧" else "🚫",
-            title = "本机硬件自检",
-            subtitle = state.deviceControlStatus.ifBlank { "正在检测本机的云台、补光灯和音量…" },
-        )
-
-        // 自检结论会缓存 24 小时（见 HardwareProbeRepository），所以必须给一个当场重测的出口，
-        // 否则用户插上 USB 摄像头、或者换了块板子之后，看到的一直是昨天那个结论。
-        HorizontalDivider()
-        SettingsAction(
-            icon = "🧪",
-            title = "重新自检",
-            // 两句之间必须断开：状态串本身没有句号（形如「上次自检：3 小时前」），
-            // 紧跟着接下一句会读成「3 小时前换过硬件」，正好把意思读反。
-            subtitle = state.hardwareProbeStatus.ifBlank { "本机还没做过硬件自检。" } +
-                "\n换过硬件、或者结果看着不对时点一下重测。",
-            actionLabel = "重测",
-            onClick = onRecheckHardware,
-        )
-    }
-}
-
-@Composable
-private fun AppUpdateCard(
-    state: UiState,
-    onCheckForUpdate: () -> Unit,
-    onStartUpdate: () -> Unit,
-) {
-    Surface(
-        color = Color.White,
-        shape = RoundedCornerShape(24.dp),
-        shadowElevation = 2.dp,
-    ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(20.dp),
-            verticalArrangement = Arrangement.spacedBy(14.dp),
-        ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Column {
-                    Text(
-                        text = "系统与软件更新",
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.Bold,
-                    )
-                    Text(
-                        text = "当前版本：v${state.appVersionName} (Build ${state.appVersionCode})",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-                Button(
-                    onClick = onCheckForUpdate,
-                    enabled = !state.isCheckingUpdate && !state.isDownloadingUpdate,
-                ) {
-                    Text(if (state.isCheckingUpdate) "检查中..." else "检查更新")
-                }
-            }
-
-            if (state.updateCheckStatus.isNotBlank()) {
-                Text(
-                    text = state.updateCheckStatus,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.primary,
-                )
-            }
-
-            if (state.availableUpdate != null) {
-                Surface(
-                    color = Color(0xFFF0FDF4),
-                    shape = RoundedCornerShape(12.dp),
-                    border = BorderStroke(1.dp, Color(0xFFBBF7D0)),
-                    modifier = Modifier.fillMaxWidth(),
-                ) {
-                    Column(
-                        modifier = Modifier.padding(14.dp),
-                        verticalArrangement = Arrangement.spacedBy(8.dp),
-                    ) {
-                        Text(
-                            text = "🎉 发现新版本 v${state.availableUpdate.versionName}",
-                            fontWeight = FontWeight.Bold,
-                            color = Color(0xFF166534),
-                            style = MaterialTheme.typography.bodyMedium,
-                        )
-                        if (state.availableUpdate.releaseNotes.isNotBlank()) {
-                            Text(
-                                text = state.availableUpdate.releaseNotes,
-                                style = MaterialTheme.typography.bodySmall,
-                                color = Color(0xFF15803D),
-                            )
-                        }
-
-                        if (state.isDownloadingUpdate) {
-                            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                                LinearProgressIndicator(
-                                    progress = { state.downloadProgressPercent / 100f },
-                                    modifier = Modifier.fillMaxWidth(),
-                                )
-                                Text(
-                                    text = "下载更新中 ${state.downloadProgressPercent}%",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = Color(0xFF166534),
-                                )
-                            }
-                        } else {
-                            Button(
-                                onClick = onStartUpdate,
-                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF16A34A)),
-                                modifier = Modifier.fillMaxWidth(),
-                            ) {
-                                Text("立即下载并安装更新")
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun RoleProfilesCard(
-    state: UiState,
-    onSelectRole: (String) -> Unit,
-    onPickRoleAvatar: (String) -> Unit,
-    onPickRolePortrait: (String) -> Unit,
-    onPickRoleVideo: (String, DigitalHumanSlot) -> Unit,
-    onStartUpload: (String, UploadTarget) -> Unit,
-    onAddRole: (String, String) -> Unit,
-    onUpdateRole: (String, String, String) -> Unit,
-    onDeleteRole: (String) -> Unit,
-    onClearRoleAvatar: (String) -> Unit,
-    onClearRolePortrait: (String) -> Unit,
-    onClearRoleVideo: (String, DigitalHumanSlot) -> Unit,
-) {
-    var editingRoleId by remember { mutableStateOf<String?>(null) }
-    var addingRole by remember { mutableStateOf(false) }
-    // 待确认删除的角色。删除是**不可撤销**的，而且会连带丢掉这个角色的
-    // 唤醒词、立绘、头像和四段形象视频——所以不能一点就走。
-    // 2026-09-21 用户模拟测试的原话：「删除和编辑并排、同样大小、同样样式，
-    // 只差文字——误触成本不对等」，实测一次点击角色就没了。
-    var pendingDelete by remember { mutableStateOf<RoleProfile?>(null) }
-    val editingRole = state.roleProfiles.firstOrNull { it.id == editingRoleId }
-
-    SettingsCard {
-        state.roleProfiles.forEachIndexed { index, role ->
-            RoleProfileRow(
-                role = role,
-                active = role.id == state.activeRoleId,
-                onSelect = { onSelectRole(role.id) },
-                onEdit = { editingRoleId = role.id },
-                onDelete = { pendingDelete = role },
-            )
-            if (index < state.roleProfiles.lastIndex) HorizontalDivider()
-        }
-        HorizontalDivider()
-        TextButton(
-            onClick = { addingRole = true },
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 12.dp, vertical = 4.dp),
-        ) {
-            Text("添加角色")
-        }
-    }
-
-    pendingDelete?.let { target ->
-        AlertDialog(
-            onDismissRequest = { pendingDelete = null },
-            title = { Text("删除角色「${target.displayName}」？") },
-            text = {
-                Text(
-                    "这个角色的唤醒词、立绘、头像和形象视频都会一起删掉，删了没法恢复。" +
-                        "如果只是暂时不想用它，可以留着不切换。",
-                )
-            },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        pendingDelete = null
-                        onDeleteRole(target.id)
-                    },
-                ) {
-                    Text("删除", color = InterruptRed, fontWeight = FontWeight.Bold)
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { pendingDelete = null }) { Text("取消") }
-            },
-        )
-    }
-
-    if (editingRole != null || addingRole) {
-        RoleEditorDialog(
-            role = editingRole,
-            onPickAvatar = { editingRole?.id?.let(onPickRoleAvatar) },
-            onPickPortrait = { editingRole?.id?.let(onPickRolePortrait) },
-            onClearAvatar = { editingRole?.id?.let(onClearRoleAvatar) },
-            onClearPortrait = { editingRole?.id?.let(onClearRolePortrait) },
-            onClearVideo = { slot -> editingRole?.id?.let { onClearRoleVideo(it, slot) } },
-            onPickVideo = { slot -> editingRole?.id?.let { onPickRoleVideo(it, slot) } },
-            onStartUpload = { target ->
-                val targetRole = editingRole
-                android.util.Log.d("LanUpload", "RoleEditorDialog click 扫码: target=${target.label}, editingRole=$targetRole")
-                targetRole?.id?.let { id ->
-                    onStartUpload(id, target)
-                } ?: run {
-                    android.util.Log.e("LanUpload", "editingRole is null when clicking 扫码")
-                }
-            },
-            onDismiss = {
-                editingRoleId = null
-                addingRole = false
-            },
-            onSave = { name, wakeWords ->
-                val role = editingRole
-                if (role == null) onAddRole(name, wakeWords)
-                else onUpdateRole(role.id, name, wakeWords)
-                editingRoleId = null
-                addingRole = false
-            },
-        )
-    }
-}
-
-@Composable
-private fun RoleProfileRow(
-    role: RoleProfile,
-    active: Boolean,
-    onSelect: () -> Unit,
-    onEdit: () -> Unit,
-    onDelete: () -> Unit,
-) {
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clickable(onClick = onSelect)
-            .padding(horizontal = 16.dp, vertical = 14.dp),
-        verticalArrangement = Arrangement.spacedBy(8.dp),
-    ) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            AssistantAvatar(
-                avatarPath = role.avatarPath,
-                fallbackText = role.displayName.takeLast(1),
-                modifier = Modifier.size(46.dp),
-            )
-            Spacer(modifier = Modifier.width(12.dp))
-            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                Text(role.displayName, fontWeight = FontWeight.SemiBold)
-                Text(
-                    text = when {
-                        active -> "当前使用 · ${role.wakeWords.joinToString("、")}"
-                        role.isBound -> "已绑定 · ${role.wakeWords.joinToString("、")}"
-                        else -> "未绑定 · ${role.wakeWords.joinToString("、")}"
-                    },
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-            if (active) StatusTag(text = "当前")
-        }
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            OutlinedButton(onClick = onEdit) { Text("编辑") }
-            OutlinedButton(onClick = onDelete) { Text("删除") }
-        }
-    }
-}
-
-@Composable
-private fun RoleEditorDialog(
-    role: RoleProfile?,
-    onPickAvatar: () -> Unit,
-    onPickPortrait: () -> Unit,
-    onPickVideo: (DigitalHumanSlot) -> Unit,
-    onStartUpload: (UploadTarget) -> Unit,
-    onClearAvatar: () -> Unit,
-    onClearPortrait: () -> Unit,
-    onClearVideo: (DigitalHumanSlot) -> Unit,
-    onDismiss: () -> Unit,
-    onSave: (String, String) -> Unit,
-) {
-    var name by remember(role?.id) { mutableStateOf(role?.displayName.orEmpty()) }
-    var wakeWords by remember(role?.id) { mutableStateOf(role?.wakeWords?.joinToString(", ").orEmpty()) }
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text(if (role == null) "添加角色" else "编辑角色") },
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                if (role != null) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(14.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        AssistantAvatar(
-                            avatarPath = role.avatarPath,
-                            fallbackText = role.displayName.takeLast(1),
-                            modifier = Modifier.size(64.dp),
-                        )
-                        OutlinedButton(onClick = onPickAvatar) { Text("更换头像") }
-                        // 客户没有 ADB、也不方便用设备上的文件选择器，「扫码」才是他们唯一能走通的入口。
-                        OutlinedButton(onClick = { onStartUpload(UploadTarget.Avatar) }) { Text("扫码") }
-                        if (role.avatarPath.isNotBlank() && File(role.avatarPath).exists()) {
-                            TextButton(onClick = onClearAvatar) {
-                                Text("清除", color = InterruptRed)
-                            }
-                        }
-                    }
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Text(
-                            text = if (role.portraitPath.isNotBlank() && File(role.portraitPath).exists()) {
-                                "角色立绘 · 已配置"
-                            } else {
-                                "角色立绘 · 未配置"
-                            },
-                        )
-                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                            OutlinedButton(onClick = onPickPortrait) { Text("选择立绘") }
-                            // 同头像：立绘也必须能扫码传，否则客户端根本用不了这个功能。
-                            OutlinedButton(onClick = { onStartUpload(UploadTarget.Portrait) }) { Text("扫码") }
-                            if (role.portraitPath.isNotBlank() && File(role.portraitPath).exists()) {
-                                TextButton(onClick = onClearPortrait) {
-                                    Text("删除", color = InterruptRed)
-                                }
-                            }
-                        }
-                    }
-                    Text(
-                        text = "四段形象视频没配齐时，用这张立绘当角色形象",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-                OutlinedTextField(
-                    value = name,
-                    onValueChange = { name = it },
-                    modifier = Modifier.fillMaxWidth(),
-                    label = { Text("名称") },
-                    singleLine = true,
-                )
-                if (role != null) {
-                    Text("角色形象视频", fontWeight = FontWeight.SemiBold)
-                    DigitalHumanSlot.entries.forEach { slot ->
-                        val configured = role.videoPath(slot).isNotBlank() && File(role.videoPath(slot)).exists()
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            Text(if (configured) "${slot.label} · 已配置" else "${slot.label} · 未配置")
-                            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                                OutlinedButton(onClick = { onPickVideo(slot) }) { Text("本机") }
-                                OutlinedButton(onClick = { onStartUpload(UploadTarget.Video(slot)) }) { Text("扫码") }
-                                // 逐段删除。原来只有一个"清空全部"的垃圾桶入口，
-                                // 一次把四段视频 + 头像 + 立绘全删掉，用户说"成本太大"。
-                                if (configured) {
-                                    TextButton(onClick = { onClearVideo(slot) }) {
-                                        Text("删除", color = InterruptRed)
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    Text(
-                        text = if (role.hasCompleteDigitalHuman()) "四段视频已齐全，将启用角色形象" else "需要配置完整四段视频才会启用角色形象",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-                OutlinedTextField(
-                    value = wakeWords,
-                    onValueChange = { wakeWords = it },
-                    modifier = Modifier.fillMaxWidth(),
-                    label = { Text("唤醒词") },
-                    supportingText = { Text("多个唤醒词用逗号分隔") },
-                    singleLine = false,
-                )
-            }
-        },
-        confirmButton = {
-            TextButton(
-                onClick = { onSave(name, wakeWords) },
-                enabled = name.isNotBlank() && wakeWords.isNotBlank(),
-            ) { Text("保存") }
-        },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
-    )
 }
 
 @Composable
