@@ -58,9 +58,9 @@ import java.time.format.DateTimeFormatter
  *
  * ## 这一屏唯一一次"主动打扰用户"
  *
- * 两处系统权限——精确闹钟和通知——都做成**按需出现的一行提示**，而不是一进来就弹窗：
- * 没有任务时它们根本不该出现（用户还不知道这个功能是什么，先给他看两个"去授权"），
- * 有了任务（或保存了第一条）之后才出现，那时他正好关心"它到点会不会提醒我"。
+ * 两处系统权限——精确闹钟和通知——都做成**按需出现的一行提示**，而不是一进来就弹窗。
+ * 什么时候出现由 [permissionHintsVisible] 一处说了算：列表页要到有任务才摆，
+ * 表单里一律摆——正在给一条任务定时间的人，恰恰最该知道"它可能晚十几分钟"。
  */
 @Composable
 internal fun ScheduledTasksScreen(
@@ -133,6 +133,7 @@ internal fun ScheduledTasksScreen(
             nowMs = nowMs,
             zone = zone,
             padding = padding,
+            context = context,
             onDraftChange = onDraftChange,
             onCancelEdit = onCancelEdit,
             onSave = onSave,
@@ -157,10 +158,7 @@ private fun TaskListView(
     onToggleEnabled: (ScheduledTaskEntity, Boolean) -> Unit,
 ) {
     SettingsPageScaffold(padding) {
-        // 一条任务都没有时不提权限：用户还不知道这个功能是什么，先给他看两个"去授权"
-        // 只会让他以为这是个要折腾的东西。有了任务之后才出现，那时他正好关心
-        // "它到点会不会提醒我"。
-        if (state.tasks.isNotEmpty()) PermissionCard(state, context)
+        if (permissionHintsVisible(state)) PermissionCard(state, context)
 
         SettingsCard {
             if (state.tasks.isEmpty()) {
@@ -237,6 +235,7 @@ private fun TaskFormView(
     nowMs: Long,
     zone: ZoneId,
     padding: PaddingValues,
+    context: Context,
     onDraftChange: (TaskDraft) -> Unit,
     onCancelEdit: () -> Unit,
     onSave: () -> Unit,
@@ -252,6 +251,8 @@ private fun TaskFormView(
     val previewSpec = draft.toEntity(existing = null, zone = zone, nowEpochMs = nowMs).recurrenceSpec()
 
     SettingsPageScaffold(padding) {
+        if (permissionHintsVisible(state)) PermissionCard(state, context)
+
         SettingsCard {
             SettingsStatus(
                 icon = if (draft.enabled) "⏰" else "⏸️",
@@ -553,6 +554,20 @@ private fun TaskFormView(
 }
 
 // ---------- 权限 ----------
+
+/**
+ * 这一屏该不该给权限提示留位置。内容为空时 [PermissionCard] 自己什么都不画。
+ *
+ * 列表页要给个门槛：一条任务都没有的人还不知道这个功能是什么，先摆两个「去授权」
+ * 只会让他以为这东西要折腾。表单里一律摆——正在给一条任务定时间的人，恰恰最该
+ * 知道"它到点可能晚十几分钟"。
+ *
+ * 这两半必须一起判，不能只留下列表那一半：**草稿是存在 ViewModel 里的，会一直开着**，
+ * 只要编辑表单还停在屏幕上，那张卡就再也见不到——用户于是得到一个死胡同：
+ * 按提示去授权，回来发现根本没有那张卡。
+ */
+internal fun permissionHintsVisible(state: ScheduledTasksUiState): Boolean =
+    state.isEditing || state.tasks.isNotEmpty()
 
 /**
  * 两张权限提示。
