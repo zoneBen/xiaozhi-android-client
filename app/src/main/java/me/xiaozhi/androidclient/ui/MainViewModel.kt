@@ -60,6 +60,7 @@ import me.xiaozhi.androidclient.model.UiState
 import me.xiaozhi.androidclient.model.resetConversationForRoleSwitch
 import me.xiaozhi.androidclient.network.NetworkTimeSynchronizer
 import me.xiaozhi.androidclient.network.OtaConfigService
+import me.xiaozhi.androidclient.network.canReuseLiveConnection
 import me.xiaozhi.androidclient.audio.uploadDuringPlayback
 import me.xiaozhi.androidclient.network.XiaozhiRealtimeClient
 import me.xiaozhi.androidclient.scheduling.ReminderConversationState
@@ -97,6 +98,9 @@ private const val GOODBYE_DISCONNECT_WINDOW_MS = 5_000L
 private const val REMINDER_LISTENING_GRACE_MS = 3_000L
 private const val REMINDER_CURRENT_TURN_GRACE_MS = 5_000L
 private const val REMINDER_SEND_RETRY_MS = 1_500L
+
+/** 等 MCP 工具清单的兜底上限，见 [MainViewModel.flushPendingActions]。 */
+private const val MCP_TOOLS_FLUSH_GUARD_MS = 3_000L
 private const val ACTIVE_GREETING_CODE_PHRASE = "【主动招呼】"
 private const val TIMER_CODE_PHRASE = "【定时提醒】"
 private const val SUPERVISION_START_CODE_PHRASE = "【监督提醒】"
@@ -194,6 +198,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var goodbyeDisconnectWindowJob: Job? = null
     private var scheduledDeliveryJob: Job? = null
     private var supervisionVerificationJob: Job? = null
+
+    /** 见 [mcpToolsDeclared]。服务端迟迟不来要工具清单时的兜底放行。 */
+    private var mcpToolsFlushGuardJob: Job? = null
 
     /** 对话消息 id 的自增来源，见 [newMessageId]。 */
     private val nextMessageId = java.util.concurrent.atomic.AtomicLong(System.currentTimeMillis())
@@ -302,6 +309,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         deviceToolSet = deviceToolSet,
         cameraEnabled = { uiState.value.deviceControlEnabled },
         pendingUserMessage = ::takePendingUserMessage,
+        onToolsDeclared = ::onMcpToolsDeclared,
         log = ::addLog,
     )
 
@@ -1470,6 +1478,26 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 val websocketConfig = result.websocket
                 val activationPending = result.activation != null && websocketConfig == null
 
+                // 这次刷新期间，连接是不是已经自己建好了？
+                //
+                // 冷启动有两条路在抢同一条连接：init 里的 autoStartDeviceSession() 去刷 OTA，
+                // 而 ensureReadyForConversation() 只要本地还存着上次的地址就直接 connect()，
+                // 不等 OTA。于是 OTA 回来时一条连接已经握完手了。
+                //
+                // 这时候若无条件把 connectionStatus 打回 DISCONNECTED 再 connect()，
+                // 刚建好的这条就被拆掉——而文字消息恰恰发在它上面。服务端确实收到了、也回答了，
+                // 只是回给了一个已经关闭的 session。现象：**冷启动后第一次发文字小智不吭声，
+                // 第二次起一切正常**（因为那时 OTA 早刷完了，没人再来拆）。
+                val liveUrl = uiState.value.websocketUrl
+                val liveToken = uiState.value.authToken
+                val keepLiveConnection = canReuseLiveConnection(
+                    incomingUrl = websocketConfig?.url,
+                    incomingToken = websocketConfig?.token,
+                    liveUrl = liveUrl,
+                    liveToken = liveToken,
+                    isConnected = uiState.value.connectionStatus == ConnectionStatus.CONNECTED,
+                )
+
                 updateState {
                     copy(
                         websocketUrl = websocketConfig?.url ?: websocketUrl,
@@ -1481,7 +1509,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         activationCode = result.activation?.code.orEmpty(),
                         activationPending = activationPending,
                         activated = websocketConfig != null,
-                        connectionStatus = ConnectionStatus.DISCONNECTED,
+                        // 要复用时**不能**写 DISCONNECTED：那会让 connect() 开头那道
+                        // 「已连接就别再连」的保护失效，正好把这条连接拆掉。
+                        connectionStatus = if (keepLiveConnection) {
+                            ConnectionStatus.CONNECTED
+                        } else {
+                            ConnectionStatus.DISCONNECTED
+                        },
                     )
                 }
                 updateRoleBindingStatus(
@@ -1860,6 +1894,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
         addLog("正在连接 ${role.displayName}：${state.websocketUrl}")
 
+        // 新连接 = 新一轮 MCP 握手，清单要重新声明一次。不清就会拿上一条连接的"已声明"
+        // 去放行，等于这个保护在重连后失效——而重连恰恰是它最该起作用的时候。
+        mcpToolsDeclared = false
+        mcpToolsFlushGuardJob?.cancel()
+        mcpToolsFlushGuardJob = null
+
         viewModelScope.launch {
             realtimeClient.connect(
                 ConnectParams(
@@ -1902,6 +1942,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         cancelExpectedGoodbyeDisconnect()
         clearPendingConversation()
         realtimeClient.disconnect()
+        // 连接没了，"清单已声明"也就作废了，下一条连接要重新走一遍握手。
+        mcpToolsDeclared = false
+        mcpToolsFlushGuardJob?.cancel()
+        mcpToolsFlushGuardJob = null
         finishListening(sendStop = false, stopCapture = true, keepTurnActive = false, reason = "已断开连接")
         audioEngine.clearPlayback {
             updateState { copy(isAssistantSpeaking = it) }
@@ -3021,12 +3065,25 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             return
         }
 
+        // 工具清单还没送到服务端，先把文字压住。
+        //
+        // 服务端拿到【文字消息】就会开一个回合，而模型要取回原话只能靠 self.message.current。
+        // 清单没送到 = 模型不知道有这个工具 = 那个回合只能变成一句寒暄。
+        // 这里 return 而不是继续往下发：发出去就是一条**不可撤回**的丢失。
+        //
+        // 位置在唤醒词**之后**：唤醒词不依赖任何工具，没理由陪着一起等。
         pendingWakePhrase?.let { phrase ->
             if (!realtimeClient.sendDetectText(phrase)) {
                 return
             }
             addLog("已上报唤醒词：$phrase")
             pendingWakePhrase = null
+        }
+
+        if (pendingTextPrompts.isNotEmpty() && !mcpToolsDeclared) {
+            addLog("文字消息暂缓：等服务端取走 MCP 工具清单后再发")
+            armMcpToolsFlushGuard()
+            return
         }
 
         while (pendingTextPrompts.isNotEmpty()) {
@@ -3039,6 +3096,26 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
 
         pendingListeningMode?.let(::startListening)
+    }
+
+    /**
+     * 服务端可能在握手时就没打算走 MCP（老服务端、或 hello 里没谈成），
+     * 那 tools/list 永远不会来。压太久等于把消息饿死，所以等一小会儿就放行，
+     * 退回原来的行为——比"永远不说话"好。
+     */
+    private fun armMcpToolsFlushGuard() {
+        if (mcpToolsFlushGuardJob?.isActive == true) {
+            return
+        }
+        mcpToolsFlushGuardJob = viewModelScope.launch {
+            delay(MCP_TOOLS_FLUSH_GUARD_MS)
+            mcpToolsFlushGuardJob = null
+            if (!mcpToolsDeclared) {
+                addLog("迟迟没等到 MCP 工具清单，文字消息不再等待")
+                mcpToolsDeclared = true
+                flushPendingActions()
+            }
+        }
     }
 
     private fun interruptCurrentTurn(reason: String) {
@@ -3130,6 +3207,25 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun isBluetoothMicActive(): Boolean {
         return uiState.value.audioRouteStatus.contains("蓝牙麦克风")
+    }
+
+    /**
+     * 服务端把工具清单要走了没有。
+     *
+     * 排队中的**文字消息**必须等它变 true：长文字压成【文字消息】暗号发出去之后，
+     * 模型得靠 `self.message.current` 才能拿回原话。清单还没送到，模型就不知道有这个工具，
+     * 于是它只会对着四个字的暗号回一句寒暄——用户看到的就是"这句话被吞了"。
+     *
+     * 冷启动时这条几乎必然踩中：连接一握完手就 flush，而 MCP 的 initialize / tools/list
+     * 是服务端紧接着才发过来的。
+     */
+    private var mcpToolsDeclared = false
+
+    private fun onMcpToolsDeclared() {
+        mcpToolsDeclared = true
+        mcpToolsFlushGuardJob?.cancel()
+        mcpToolsFlushGuardJob = null
+        flushPendingActions()
     }
 
     private fun addChatMessage(role: ChatRole, text: String) {

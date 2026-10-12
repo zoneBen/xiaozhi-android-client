@@ -31,6 +31,14 @@ class McpCameraServer(
     private val cameraEnabled: () -> Boolean = { true },
     /** 用户在输入框里打的长文字（listen/detect 发不出去的那部分）。 */
     private val pendingUserMessage: () -> String? = { null },
+    /**
+     * 工具清单已经回给服务端了。
+     *
+     * 这是「服务端此刻知不知道有 `self.message.current` 这个工具」的唯一可靠信号。
+     * 排队中的文字消息必须等它——否则服务端会拿着【文字消息】这四个字开一个回合，
+     * 而模型手上根本没有取回原话的工具，只能回一句「你好呀，有什么可以帮你的吗」。
+     */
+    private val onToolsDeclared: () -> Unit = {},
     private val log: (String) -> Unit,
 ) {
     fun handleIncomingMcp(rawText: String): Boolean {
@@ -120,6 +128,9 @@ class McpCameraServer(
                 if (skippedByUser.isNotEmpty()) append("（用户已关闭：${skippedByUser.joinToString("、")}）")
             },
         )
+        // 放在最后：回调里会去 flush 排队中的文字消息，必须等 replyResult 先发出去，
+        // 否则又是"回合开在工具声明之前"。
+        onToolsDeclared()
     }
 
     private fun handleToolCall(id: Any, params: JSONObject?, requestSessionId: String?) {
