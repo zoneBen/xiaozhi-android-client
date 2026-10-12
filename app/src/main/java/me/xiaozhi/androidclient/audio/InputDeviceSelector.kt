@@ -33,15 +33,17 @@ import android.util.Log
  * 找不到 USB/有线麦时**等一小会儿**（USB 枚举通常几百毫秒到几秒），仍然没有才退到板载麦，
  * 并且**大声记一条警告**——下次再出这种事，日志里第一眼就能看到，不用再从头查。
  *
- * ## 例外：内置麦真的能拾音的机型（2026-10-11 TV5701）
+ * ## 例外：内置麦本身就能拾音的机器
  *
  * 上面这套"等 USB、退板载、发警告"的前提是**板载通路是聋的**——那是 RK3568 工程样机的
- * 硬件事实，不是通用规律。TV5701 一体机板上焊了麦克风，把前者原样搬过去会让它永远
- * 卡在"没有检测到外接麦克风"的自检页上（详见 [DeviceAudioProfile] 的注释）。
+ * 硬件事实，不是通用规律。**绝大多数机器（手机、一体机面板）板上是焊了麦克风的**，
+ * 把前者原样搬过去会让它们永远卡在"没有检测到外接麦克风"的自检页上
+ * （详见 [DeviceAudioProfile] 的注释，那里记了判据两次翻转的由来）。
  *
- * 所以"等不等 USB""要不要报警"现在按机型分叉：机型说内置麦可用，就直接采用内置麦，
- * 不空等、不报警。外接设备仍然是**优先级更高**的那条路——采集/唤醒循环每帧都会复查
- * 路由（`findPreferredInputDevice` / `recheckInputDevice`），USB 麦晚到也会自动切过去。
+ * 所以"等不等 USB""要不要报警"现在按机型分叉：**只有确认没焊咪头的那批老板子**
+ * （[DeviceAudioProfile.isDeafBuiltinModel]）才空等、才报警，其余机器直接采用内置麦。
+ * 外接设备仍然是**优先级更高**的那条路——采集/唤醒循环每帧都会复查路由
+ * （`findPreferredInputDevice` / `recheckInputDevice`），USB 麦晚到也会自动切过去。
  */
 object InputDeviceSelector {
 
@@ -107,8 +109,8 @@ object InputDeviceSelector {
     /**
      * 选输入设备，**会为 USB 麦短暂等待**。只能在后台线程调用。
      *
-     * 唯一的例外是内置麦本身可用的机型（[DeviceAudioProfile]）：那里不等、也不报警，
-     * 直接采用内置麦。
+     * 唯一的例外是**确认没焊咪头的老板子**（[DeviceAudioProfile.isDeafBuiltinModel]）：
+     * 只有那里才需要等 USB 麦；其余机器直接采用内置麦，不等也不报警。
      *
      * @param preferBuiltin 设备端 AEC 要求采集与播放落在同一张声卡上，那种模式下必须钉板载麦
      *   （本机 `ECHO_CANCEL_MODE` 是 NONE，所以走的是 false 这条路）。
@@ -132,9 +134,9 @@ object InputDeviceSelector {
         val immediate = preferredExternal(devices, manager)
         if (immediate != null) return immediate
 
-        // 本机内置麦是真能拾音的机型（TV5701 一体机）：直接采用，不空等那两秒。
-        // 等它毫无意义——这台机器不靠 USB 麦也能用，而每次起采都先卡两秒会变成
-        // "叫了它要愣一下才应"。USB 麦真接上时，采集循环每帧复查路由会自动切过去。
+        // 默认认为本机内置麦能拾音（只有确认没焊咪头的老板子才走不到这里）：直接采用，
+        // 不空等那两秒。等它毫无意义——这台机器不靠 USB 麦也能用，而每次起采都先卡两秒
+        // 会变成"叫了它要愣一下才应"。USB 麦真接上时，采集循环每帧复查路由会自动切过去。
         if (builtin != null && DeviceAudioProfile.supportsBuiltinMic()) {
             Log.d(
                 TAG,
@@ -160,12 +162,19 @@ object InputDeviceSelector {
             }
         }
 
-        Log.w(
-            TAG,
-            "[CAPTURE] 没有 USB/有线麦克风，只能退回板载麦（${builtin?.productName}）。" +
-                "⚠ 本机板载采集通路没有焊咪头，若确实退到了它，设备会完全听不见且界面不会有任何提示 —— " +
-                "请检查 USB 摄像头是否插好。",
-        )
+        // 走到这里只有两种可能：这台机器压根没有内置麦，或者它是那批"没焊咪头"的老板子
+        // ——内置麦能用的机器在上面就 return 了。两种情况都得把话说明白，
+        // 别让人对着一块听不见的板子猜。
+        if (builtin == null) {
+            Log.w(TAG, "[CAPTURE] 等不到 USB/有线麦克风，本机也没有内置麦，设备会完全听不见。")
+        } else {
+            Log.w(
+                TAG,
+                "[CAPTURE] 等不到 USB/有线麦克风，只能退回板载麦（${builtin.productName}）。" +
+                    "⚠ 本机是「板载采集通路没焊咪头」的机型（${DeviceAudioProfile.describe()}），" +
+                    "退到它等于听不见，界面上也不会有提示 —— 请检查 USB 摄像头是否插好。",
+            )
+        }
         return builtin
             ?: devices.firstOrNull(::isUsbInput)
             ?: devices.firstOrNull { it.type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO }
@@ -189,8 +198,9 @@ data class AudioInputHealth(
     /** USB / 有线麦克风是否在位。 */
     val externalMicPresent: Boolean,
     /**
-     * 本机内置麦这次检查**确实可用**：机型支持（见 [DeviceAudioProfile]）且系统里真有
-     * `TYPE_BUILTIN_MIC` 设备。两个条件缺一不可——机型说支持但设备不在，照样是听不见。
+     * 本机内置麦这次检查**确实可用**：机型不在"没焊咪头"的黑名单里（见 [DeviceAudioProfile]）
+     * 且系统里真有 `TYPE_BUILTIN_MIC` 设备。两个条件缺一不可——机型默认可信但设备不在，
+     * 照样是听不见。
      */
     val builtinMicUsable: Boolean,
     /** 当前实际选中的设备名，给用户看。 */
