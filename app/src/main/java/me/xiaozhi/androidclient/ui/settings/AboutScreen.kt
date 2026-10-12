@@ -45,7 +45,7 @@ import me.xiaozhi.androidclient.R
 import me.xiaozhi.androidclient.model.UiState
 
 /**
- * 「关于」卡片：作者 / 微信 / 交流群 / 开源许可。
+ * 「关于」卡片：作者 / 微信 / 软件定制 / 交流群 / 开源许可。
  *
  * 署名是**双署名**，不是客套：本项目是 MIT 的衍生物，MIT 的条件是
  * 「The above copyright notice and this permission notice shall be included in all
@@ -257,6 +257,14 @@ private fun AboutCard() {
             AboutInfoRow(
                 label = "微信",
                 value = "扫码添加 ›",
+                onClick = { showWechat = true },
+            )
+            // 这一页唯一一句"广告"。紧跟在微信下面、并且整行可点，是有意的：
+            // 想谈的人下一步就是加微信，让他点这一行直接弹二维码，
+            // 不用回头再找上面那一行。
+            AboutInfoRow(
+                label = "软件定制",
+                value = "嵌入式 / PC / 手机端均可，扫码细聊 ›",
                 onClick = { showWechat = true },
             )
             AboutInfoRow(
