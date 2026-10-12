@@ -123,3 +123,6 @@ private const val HOUR_MS = 3_600_000L
 /** 便于界面与测试复用的时刻解析（`"08:30"`）。解析不出来返回 null，不抛。 */
 fun parseClockTime(text: String): LocalTime? =
     runCatching { LocalTime.parse(text.trim(), CLOCK_FORMAT) }.getOrNull()
+
+/** [parseClockTime] 的逆：编辑表单里要把它填回输入框。补零到 `"08:30"`，和上面那行格式对齐。 */
+fun formatClockTime(time: LocalTime): String = CLOCK_FORMAT.format(time)
