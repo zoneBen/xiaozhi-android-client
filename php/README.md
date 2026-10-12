@@ -404,8 +404,8 @@ DELETE FROM xiaozhi_android_client_admin_login WHERE last_fail_at < NOW() - INTE
 ### 9.1 上传的 APK 必须用同一个证书签名
 
 客户端的 `AppUpdateManager` 在装之前会校验下载包的签名证书 SHA-256，必须等于
-`EXPECTED_SIGNER_SHA256`（当前 `cf16874766d4d343c9e67795adf12b5f12cb3e1096122e73cdde42d7b34dc835`，
-对应 `~/.android/debug.keystore`；v1.2.1 起所有对外发布版本都用它签）。
+`EXPECTED_SIGNER_SHA256`（当前 `dcc4c2f7bb13e6b7a31f8abfab1839ed0889fbbf340d3c5f6e7cd2a750637384`，
+对应定制版发版用的 `mrcong.jks`）。用别的证书签的包会被拒装。
 
 **用别的证书签的包会被拒装**，而且拒绝发生在下载、校验 SHA-256 都通过之后 ——
 现象是「明明提示有新版本、下载也成功，就是装不上」。这是特性不是 bug：它是防镜像投毒的
