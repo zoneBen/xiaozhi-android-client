@@ -1,6 +1,7 @@
 package me.xiaozhi.androidclient.model
 
 import me.xiaozhi.androidclient.BuildConfig
+import me.xiaozhi.androidclient.camera.CameraFacing
 import org.json.JSONObject
 
 data class OtaRequest(
@@ -164,10 +165,40 @@ data class UiState(
     val debugWavDumpEnabled: Boolean = false,
 
     /**
-     * 本地设备控制（摄像头云台 / 补光灯）总开关。用户要求"可以关闭"，
-     * 关掉后 `self.device.*` 不再向服务端声明，模型看不到也就调不到。
+     * 通用功能开关：**摄像头拍照 + 媒体音量**。用户要求"可以关闭"。
+     *
+     * 关掉后 `self.camera.take_photo` 与 `self.audio_speaker.set_volume` 不再向服务端声明，
+     * 模型看不到也就调不到；设备自己发起的监督核验也会跳过拍照（见
+     * `SupervisionPolicy.skipReasonWhenCameraDisabled`）——不然"关了还在拍"就是个谎。
      */
     val deviceControlEnabled: Boolean = true,
+
+    /**
+     * 硬件强相关开关：**云台 / 补光灯 / 红外灯**。
+     *
+     * 和 [deviceControlEnabled] 分开，是因为"这台机器有没有云台"是硬件事实，
+     * 而"用户在不在意被语音控制"是意愿；混在一个开关里，用户为了关云台得连音量一起牺牲。
+     */
+    val hardwareControlEnabled: Boolean = true,
+
+    /**
+     * 本机**认不认得出**云台 / 补光灯（反射探测厂商标商接口的结果）。
+     *
+     * 为 false 时设置页把这个开关置灰：留着能点等于骗用户，打开也没东西可控制。
+     * 注意它证的是"厂商接口在不在"，不是"灯和电机在不在"——一台机器可能接口在、硬件不在。
+     */
+    val hardwareControlAvailable: Boolean = false,
+
+    /** 多摄像头时用哪一台。本机只有一个朝向时它不起作用。 */
+    val cameraFacing: CameraFacing = CameraFacing.BACK,
+
+    /**
+     * 本机**内置**摄像头有哪几个朝向可选，用来决定要不要显示"用哪一个"那一行。
+     *
+     * 少于两项就没什么可选的，不显示。只算内置：外接在 `CameraSelection.choose` 里
+     * 是无条件优先的，摆进来会造出"选了后置、实际拍的还是 USB"这种假选项。
+     */
+    val cameraFacingChoices: List<CameraFacing> = emptyList(),
 
     /** 设置页给用户看的一句话：本机到底认没认出云台和补光灯。 */
     val deviceControlStatus: String = "",

@@ -2,6 +2,7 @@ package me.xiaozhi.androidclient.data
 
 import android.content.Context
 import android.provider.Settings
+import me.xiaozhi.androidclient.camera.CameraFacing
 import java.security.MessageDigest
 import java.util.Locale
 import java.util.UUID
@@ -32,7 +33,21 @@ private const val KEY_TERMUX_API_COMMAND = "termux_api_command"
 private const val KEY_TERMUX_API_ARGUMENTS = "termux_api_arguments"
 private const val KEY_DEBUG_LOGGING_ENABLED = "debug_logging_enabled"
 private const val KEY_DEBUG_WAV_DUMP_ENABLED = "debug_wav_dump_enabled"
+
+/**
+ * 通用功能开关（拍照 + 媒体音量）。
+ *
+ * **键名里那个 `device_control` 不改**：改键名等于让所有已装机的设置静默回默认值。
+ * 它现在管的东西比名字窄（云台/补光灯搬去了 [KEY_HARDWARE_CONTROL_ENABLED]），
+ * 这是改名要付的代价，不值。
+ */
 private const val KEY_DEVICE_CONTROL_ENABLED = "device_control_enabled"
+
+/** 硬件强相关开关（云台 / 补光灯 / 红外灯）。 */
+private const val KEY_HARDWARE_CONTROL_ENABLED = "hardware_control_enabled"
+
+/** 多摄像头时用哪一台，存的是 `CameraFacing` 的名字。 */
+private const val KEY_CAMERA_FACING = "camera_facing"
 
 const val DEFAULT_OTA_URL: String = "https://api.tenclass.net/xiaozhi/ota/"
 const val DEFAULT_PROTOCOL_VERSION: String = "1"
@@ -69,12 +84,22 @@ data class StoredConfig(
     val debugLoggingEnabled: Boolean,
     val debugWavDumpEnabled: Boolean,
     /**
-     * 本地设备控制（云台 / 补光灯）总开关，默认开。
+     * 通用功能开关（摄像头拍照 + 媒体音量），默认开。
      *
-     * 默认开的理由：这台机器的卖点之一就是"说左转就左转、说开灯就开灯"，
-     * 装完就能用才符合预期；真机没这个硬件时工具也不会被声明（见 DeviceToolSet）。
+     * 默认开的理由：说「看看这是什么」就拍照、说「声音小一点」就调音量，
+     * 装完就能用才符合预期。
      */
     val deviceControlEnabled: Boolean,
+    /**
+     * 硬件强相关开关（云台 / 补光灯 / 红外灯），默认开。
+     *
+     * 和 [deviceControlEnabled] 分开的理由：这台机器有没有云台是**硬件事实**，
+     * 用户想不想让它被语音控制是**意愿**。混在一个开关里，用户为了关掉云台就得
+     * 连音量一起牺牲，而媒体音量任何 Android 设备都有。
+     */
+    val hardwareControlEnabled: Boolean,
+    /** 多摄像头时用哪一台（本机只有一个朝向时这个值不起作用）。 */
+    val cameraFacing: CameraFacing,
 )
 
 class AppPreferences(private val context: Context) {
@@ -120,6 +145,14 @@ class AppPreferences(private val context: Context) {
             debugLoggingEnabled = prefs.getBoolean(KEY_DEBUG_LOGGING_ENABLED, false),
             debugWavDumpEnabled = prefs.getBoolean(KEY_DEBUG_WAV_DUMP_ENABLED, false),
             deviceControlEnabled = prefs.getBoolean(KEY_DEVICE_CONTROL_ENABLED, true),
+            // 迁移：新键**没有**时继承老总开关的值，不能直接默认 true。
+            // 有人当初就是靠关掉那个总开关来停住云台和灯的，升级后静默把它们打开，
+            // 等于替用户动了硬件——那是这台设备上唯一会自己动起来的东西。
+            hardwareControlEnabled = prefs.getBoolean(
+                KEY_HARDWARE_CONTROL_ENABLED,
+                prefs.getBoolean(KEY_DEVICE_CONTROL_ENABLED, true),
+            ),
+            cameraFacing = CameraFacing.parsePreference(prefs.getString(KEY_CAMERA_FACING, null)),
         )
     }
 
@@ -151,6 +184,8 @@ class AppPreferences(private val context: Context) {
             .putBoolean(KEY_DEBUG_LOGGING_ENABLED, config.debugLoggingEnabled)
             .putBoolean(KEY_DEBUG_WAV_DUMP_ENABLED, config.debugWavDumpEnabled)
             .putBoolean(KEY_DEVICE_CONTROL_ENABLED, config.deviceControlEnabled)
+            .putBoolean(KEY_HARDWARE_CONTROL_ENABLED, config.hardwareControlEnabled)
+            .putString(KEY_CAMERA_FACING, config.cameraFacing.name)
             .apply()
     }
 

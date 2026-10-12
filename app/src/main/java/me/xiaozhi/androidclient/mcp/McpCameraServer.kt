@@ -19,8 +19,16 @@ class McpCameraServer(
     private val isCurrentSession: (String) -> Boolean,
     private val isScheduledDeliveryInProgress: () -> Boolean,
     private val isInitialSupervisionReminderInProgress: () -> Boolean,
-    /** 本地设备（云台 / 补光灯）工具。用户可以在设置里关掉它。 */
+    /** 本地设备（云台 / 补光灯 / 音量）工具。用户可以在设置里分组关掉。 */
     private val deviceToolSet: DeviceToolSet,
+    /**
+     * 用户有没有开着拍照。false 时不声明摄像头工具、监督描述里也不再提拍照。
+     *
+     * 这里只管"别告诉模型有这个工具"。**执行期的拒绝不在这里**——它收在
+     * [CameraVisionTool] 自己身上，因为拍照还有一条不走 MCP 的入口
+     * （监督提醒的定时核验），只拦这一层等于没拦。
+     */
+    private val cameraEnabled: () -> Boolean = { true },
     /** 用户在输入框里打的长文字（listen/detect 发不出去的那部分）。 */
     private val pendingUserMessage: () -> String? = { null },
     private val log: (String) -> Unit,
@@ -82,12 +90,15 @@ class McpCameraServer(
     }
 
     private fun replyToolsList(id: Any) {
+        val cameraOn = cameraEnabled()
         val tools = JSONArray()
-            .put(cameraToolSchema())
-            .put(timerSchema())
+        if (cameraOn) {
+            tools.put(cameraToolSchema())
+        }
+        tools.put(timerSchema())
             .put(timerCurrentSchema())
-            .put(supervisionStartSchema())
-            .put(supervisionCurrentSchema())
+            .put(supervisionStartSchema(cameraOn))
+            .put(supervisionCurrentSchema(cameraOn))
             .put(supervisionCancelSchema())
             .put(userMessageSchema())
         // 云台/补光灯只在"功能开着且本机确实有这个硬件"时才声明。
@@ -95,11 +106,18 @@ class McpCameraServer(
         val deviceTools = deviceToolSet.schemas()
         deviceTools.forEach { tools.put(it) }
         replyResult(id, JSONObject().put("tools", tools))
+        // 「没声明」有两个来源，日志里要分开：用户关掉的（**用户已关闭：…**），
+        // 和这台机器本来就没有的。后者不能写成前者——那会让人去找一个点不动的开关。
+        val skippedByUser = buildList {
+            if (!cameraOn) add("拍照")
+            addAll(deviceToolSet.userDisabledLabels())
+        }
         log(
-            if (deviceTools.isEmpty()) {
-                "已向服务端声明摄像头、定时提醒、监督和用户文字工具（本地设备控制未声明）"
-            } else {
-                "已向服务端声明摄像头、定时提醒、监督、用户文字和 ${deviceTools.size} 个本地设备工具"
+            buildString {
+                append("已向服务端声明定时提醒、监督和用户文字工具")
+                if (cameraOn) append("、摄像头")
+                if (deviceTools.isNotEmpty()) append("和 ${deviceTools.size} 个本地设备工具")
+                if (skippedByUser.isNotEmpty()) append("（用户已关闭：${skippedByUser.joinToString("、")}）")
             },
         )
     }
@@ -117,8 +135,10 @@ class McpCameraServer(
         }
         when (name) {
             CAMERA_TOOL_NAME -> {
-                // Camera decisions belong to the model. Android only delivers
-                // the reminder and never performs local supervision vision.
+                // 这里**不是**拍照唯一的来路：监督提醒到点后，
+                // `MainViewModel.runSupervisionVerification` 会自己直接调相机核验，
+                // 不经过 tools/list、也不经过这里。所以"关掉相机"不能只做在这一层，
+                // 真正的围栏在 CameraVisionTool 自己身上。
                 handleCameraCall(id, requestSessionId, args)
             }
             "self.timer.set" -> {
@@ -268,9 +288,26 @@ class McpCameraServer(
         JSONArray(),
     )
 
-    private fun supervisionStartSchema() = simpleToolSchema(
+    /**
+     * 监督任务。拍照关掉时它降级成"只提醒、不核实"，描述也要跟着改口——
+     * 不然模型会对用户承诺"待会儿我看看你做完了没"，而这件事根本做不到。
+     *
+     * [cameraEnabled] 由调用方**一次算好传进来**，不在这里现读：同一份 `tools/list`
+     * 里两个监督工具的措辞必须一致，各自现读的话正赶上用户切开关，就会出现
+     * "start 说会拍照核实 / current 说拍不了"这种自相矛盾的回复。
+     */
+    private fun supervisionStartSchema(cameraEnabled: Boolean) = simpleToolSchema(
         "self.supervision.start",
-        "Start a camera-verified supervision task. Several supervision tasks may run at the same time: never tell the user to cancel an existing task first. For plain time reminders that do not need the camera, use self.timer.set instead.",
+        if (cameraEnabled) {
+            "Start a camera-verified supervision task. Several supervision tasks may run at the same " +
+                "time: never tell the user to cancel an existing task first. For plain time " +
+                "reminders that do not need the camera, use self.timer.set instead."
+        } else {
+            "Start a supervision task (a reminder that will be reported back to you when it is due). " +
+                "The camera is turned off, so completion can NOT be verified — do not promise the " +
+                "user that you will check. Several supervision tasks may run at the same time: " +
+                "never tell the user to cancel an existing task first."
+        },
         JSONObject()
             .put("seconds", JSONObject().put("type", "integer"))
             .put("message", JSONObject().put("type", "string")),
@@ -286,9 +323,26 @@ class McpCameraServer(
         JSONArray(),
     )
 
-    private fun supervisionCurrentSchema() = simpleToolSchema(
+    /**
+     * 监督任务工具。描述里的后半句要跟着拍照开关走。
+     *
+     * 拍照关掉时摄像头工具**不会声明**，那句 "call self.camera.take_photo before judging
+     * completion" 就成了一条**指向不存在工具的错误指令**：模型会去调它、调不到、
+     * 然后再来一轮。所以关掉时改成"把任务告诉用户就好"。
+     *
+     * 监督本身**不**跟着摘掉：承重部分是"到点提醒"，拍照核实只是附加项。
+     * 一起摘掉等于顺手删掉用户要的提醒功能。
+     */
+    private fun supervisionCurrentSchema(cameraEnabled: Boolean) = simpleToolSchema(
         "self.supervision.current",
-        "When you receive 【监督】, call this tool first to get the task. Then remind the user and call self.camera.take_photo before judging completion.",
+        if (cameraEnabled) {
+            "When you receive 【监督】, call this tool first to get the task. Then remind the user " +
+                "and call self.camera.take_photo before judging completion."
+        } else {
+            "When you receive 【监督】, call this tool first to get the task. Then remind the user " +
+                "of it. Do not try to photograph anything: the user has turned the camera off, " +
+                "so there is no way to verify completion."
+        },
         JSONObject(),
         JSONArray(),
     )

@@ -19,10 +19,18 @@ class DeviceToolSetTest {
     private val hardware = FakePanelHardware()
     private val volumeHardware = FakeVolumeHardware()
 
-    private fun tools(enabled: Boolean = true) = DeviceToolSet(
+    /**
+     * 两个门默认都开——绝大多数用例只关心"开着的时候行为对不对"。
+     *
+     * [general] 是通用组（媒体音量），[hardwareOn] 是硬件组（云台/补光灯/红外）。
+     * 两者**互相独立**：只关一个时另一个照常工作，这是这轮拆分的全部意义所在，
+     * 所以 "两组都关" 必须显式两个都传。
+     */
+    private fun tools(general: Boolean = true, hardwareOn: Boolean = true) = DeviceToolSet(
         hardware = hardware,
         volume = volumeHardware,
-        enabled = { enabled },
+        hardwareEnabled = { hardwareOn },
+        volumeEnabled = { general },
     )
 
     private fun call(name: String, vararg args: Pair<String, Any>): DeviceToolOutcome {
@@ -44,14 +52,31 @@ class DeviceToolSetTest {
     // ---- 可关闭（用户明确要求） ----
 
     @Test
-    fun `disabled feature declares no tools at all`() {
-        assertTrue(tools(enabled = false).schemas().isEmpty())
+    fun `both groups off declares no tools at all`() {
+        assertTrue(tools(general = false, hardwareOn = false).schemas().isEmpty())
+    }
+
+    @Test
+    fun `turning off the hardware group leaves the volume tool declared`() {
+        // 这台机器明明有云台和灯，用户只是不想让语音碰它们。音量不该跟着一起没——
+        // 那正是这轮要把一个总开关拆成两个的原因。
+        val names = tools(hardwareOn = false).schemas().map { it.getString("name") }
+        assertEquals(listOf(DeviceToolSet.VOLUME_TOOL, DeviceToolSet.STATUS_TOOL), names)
+    }
+
+    @Test
+    fun `turning off the general group leaves the gimbal and light tools declared`() {
+        val names = tools(general = false).schemas().map { it.getString("name") }
+        assertEquals(
+            listOf(DeviceToolSet.GIMBAL_TOOL, DeviceToolSet.LIGHT_TOOL, DeviceToolSet.STATUS_TOOL),
+            names,
+        )
     }
 
     @Test
     fun `disabled feature refuses calls even if the server still has the old list`() {
         val message = failureText(
-            tools(enabled = false).call(
+            tools(hardwareOn = false).call(
                 DeviceToolSet.LIGHT_TOOL,
                 JSONObject().put("target", "all").put("on", true),
             ),
@@ -59,6 +84,67 @@ class DeviceToolSetTest {
         assertTrue(message.contains("已被用户关闭"))
         // 关键：硬件一次都没被碰过。
         assertTrue(hardware.fillLightCalls.isEmpty())
+    }
+
+    @Test
+    fun `each group rejects in its own words`() {
+        // 两句话必须不同：模型要能把"到底是哪一项被关了"复述给用户。
+        val hardwareMessage = failureText(
+            tools(hardwareOn = false).call(
+                DeviceToolSet.GIMBAL_TOOL,
+                JSONObject().put("direction", "left"),
+            ),
+        )
+        val volumeMessage = failureText(
+            tools(general = false).call(DeviceToolSet.VOLUME_TOOL, JSONObject().put("volume", 30)),
+        )
+        assertTrue(hardwareMessage.contains("云台"))
+        assertTrue(volumeMessage.contains("音量"))
+        assertTrue(hardwareMessage != volumeMessage)
+    }
+
+    @Test
+    fun `status still answers when only one group is off`() {
+        // status 是两组共用的入口。写成"两道闸一起卡"的话，只关掉硬件那组时，
+        // 一次"现在音量多少"的调用会被连坐拒掉——而模型做相对音量调整前必须查它。
+        val text = successText(tools(hardwareOn = false).call(DeviceToolSet.STATUS_TOOL, JSONObject()))
+        assertTrue(text.contains("媒体音量"))
+        // 关掉的那组整段不出现，也**不报"本机没有云台"**——那台机器有云台，只是被关了。
+        assertTrue(text.contains("云台").not())
+        assertTrue(text.contains("补光灯").not())
+    }
+
+    @Test
+    fun `status only reports the hardware group when the volume group is off`() {
+        hardware.snapshotValue = PanelSnapshot(
+            angleDegrees = 45,
+            rotating = false,
+            bottomLightOn = true,
+            topLightOn = false,
+            infraredOn = null,
+        )
+        val text = successText(tools(general = false).call(DeviceToolSet.STATUS_TOOL, JSONObject()))
+        assertTrue(text.contains("云台角度 45 度"))
+        assertTrue(text.contains("下方补光灯：开"))
+        assertTrue(text.contains("媒体音量").not())
+    }
+
+    @Test
+    fun `status is refused only when both groups are off`() {
+        assertTrue(
+            failureText(tools(general = false, hardwareOn = false).call(DeviceToolSet.STATUS_TOOL, JSONObject()))
+                .contains("已被用户关闭"),
+        )
+    }
+
+    @Test
+    fun `the status description only promises what this machine can report`() {
+        val statusOnlyVolume = tools(hardwareOn = false).schemas()
+            .first { it.getString("name") == DeviceToolSet.STATUS_TOOL }
+            .getString("description")
+        assertTrue(statusOnlyVolume.contains("当前媒体音量"))
+        assertTrue(statusOnlyVolume.contains("云台").not())
+        assertTrue(statusOnlyVolume.contains("灯").not())
     }
 
     @Test
@@ -80,7 +166,8 @@ class DeviceToolSetTest {
         val lightOnly = DeviceToolSet(
             hardware = FakePanelHardware(gimbalAvailable = false),
             volume = volumeHardware,
-            enabled = { true },
+            hardwareEnabled = { true },
+            volumeEnabled = { true },
         )
         val names = lightOnly.schemas().map { it.getString("name") }
         assertEquals(
@@ -94,7 +181,8 @@ class DeviceToolSetTest {
         val gimbalOnly = DeviceToolSet(
             hardware = FakePanelHardware(lightAvailable = false),
             volume = volumeHardware,
-            enabled = { true },
+            hardwareEnabled = { true },
+            volumeEnabled = { true },
         )
         val names = gimbalOnly.schemas().map { it.getString("name") }
         assertEquals(
@@ -109,10 +197,70 @@ class DeviceToolSetTest {
         val plain = DeviceToolSet(
             hardware = FakePanelHardware(gimbalAvailable = false, lightAvailable = false),
             volume = volumeHardware,
-            enabled = { true },
+            hardwareEnabled = { true },
+            volumeEnabled = { true },
         )
         val names = plain.schemas().map { it.getString("name") }
         assertEquals(listOf(DeviceToolSet.VOLUME_TOOL, DeviceToolSet.STATUS_TOOL), names)
+    }
+
+    @Test
+    fun `status on a machine with nothing to report is refused, not answered with a bare period`() {
+        // 这是"总闸看用户开关、内容看硬件"错位之后长出来的东西：一台没有云台和灯的手机
+        // （`hardwareEnabled` 默认还是 true，所以总闸放行）把「拍照与音量」关掉之后，
+        // `callStatus` 拼出来的 parts 是空的，回给模型一句光秃秃的「。」——
+        // 一个什么都没说的"成功"，比拒绝还糟：模型会当成"设备状态正常"讲给用户。
+        val plainPhone = DeviceToolSet(
+            hardware = FakePanelHardware(gimbalAvailable = false, lightAvailable = false),
+            volume = volumeHardware,
+            hardwareEnabled = { true },
+            volumeEnabled = { false },
+        )
+        val outcome = plainPhone.call(DeviceToolSet.STATUS_TOOL, JSONObject())
+        val message = failureText(outcome)
+        assertTrue(message.contains("没有云台和补光灯"))
+        // 不能退到那句"本地设备控制已被用户关闭"：用户关的只有音量，云台是这台机器**本来就没有**的。
+        // 报错了就会把人引去设置页找一个在这台机器上点不动的开关。
+        assertEquals(DeviceToolSet.NOTHING_REPORTABLE_MESSAGE, message)
+        assertTrue(message != DeviceToolSet.DEFAULT_DISABLED_MESSAGE)
+    }
+
+    @Test
+    fun `a machine with nothing to report still declares no status tool`() {
+        // 声明面和执行面必须同一个判据：上面那条拒绝了，这条就不该声明。
+        val plainPhone = DeviceToolSet(
+            hardware = FakePanelHardware(gimbalAvailable = false, lightAvailable = false),
+            volume = volumeHardware,
+            hardwareEnabled = { true },
+            volumeEnabled = { false },
+        )
+        assertTrue(plainPhone.schemas().isEmpty())
+    }
+
+    // ---- 日志用的"用户关掉了哪些" ----
+
+    @Test
+    fun `user disabled labels name only the groups the user turned off`() {
+        assertEquals(emptyList<String>(), tools().userDisabledLabels())
+        assertEquals(listOf("云台与补光灯"), tools(hardwareOn = false).userDisabledLabels())
+        assertEquals(listOf("音量"), tools(general = false).userDisabledLabels())
+        assertEquals(
+            listOf("云台与补光灯", "音量"),
+            tools(general = false, hardwareOn = false).userDisabledLabels(),
+        )
+    }
+
+    @Test
+    fun `a machine without the hardware does not get reported as user disabled`() {
+        // 这台机器没有云台和灯，而硬件那组开关是**开着**的。日志里把它写成"用户已关闭"
+        // 就是在撒谎，会让人去设置页找一个本来就点不动的开关。
+        val plain = DeviceToolSet(
+            hardware = FakePanelHardware(gimbalAvailable = false, lightAvailable = false),
+            volume = volumeHardware,
+            hardwareEnabled = { true },
+            volumeEnabled = { true },
+        )
+        assertEquals(emptyList<String>(), plain.userDisabledLabels())
     }
 
     @Test
@@ -120,7 +268,8 @@ class DeviceToolSetTest {
         val noVolume = DeviceToolSet(
             hardware = hardware,
             volume = FakeVolumeHardware(volumeAvailable = false),
-            enabled = { true },
+            hardwareEnabled = { true },
+            volumeEnabled = { true },
         )
         val names = noVolume.schemas().map { it.getString("name") }
         assertEquals(
@@ -177,7 +326,8 @@ class DeviceToolSetTest {
         val broken = DeviceToolSet(
             hardware = FakePanelHardware(writeSucceeds = false),
             volume = volumeHardware,
-            enabled = { true },
+            hardwareEnabled = { true },
+            volumeEnabled = { true },
         )
         val outcome = broken.call(
             DeviceToolSet.LIGHT_TOOL,
@@ -237,7 +387,8 @@ class DeviceToolSetTest {
         val outcome = DeviceToolSet(
             hardware = FakePanelHardware(gimbalAvailable = false),
             volume = volumeHardware,
-            enabled = { true },
+            hardwareEnabled = { true },
+            volumeEnabled = { true },
         ).call(DeviceToolSet.GIMBAL_TOOL, JSONObject().put("direction", "left"))
         assertTrue(failureText(outcome).contains("没有可用的云台"))
     }
@@ -291,7 +442,8 @@ class DeviceToolSetTest {
         val failing = DeviceToolSet(
             hardware = hardware,
             volume = FakeVolumeHardware(writeSucceeds = false),
-            enabled = { true },
+            hardwareEnabled = { true },
+            volumeEnabled = { true },
         )
         val outcome = failing.call(DeviceToolSet.VOLUME_TOOL, JSONObject().put("volume", 30))
         assertTrue(failureText(outcome).contains("音量设置失败"))
@@ -302,7 +454,8 @@ class DeviceToolSetTest {
         val outcome = DeviceToolSet(
             hardware = hardware,
             volume = FakeVolumeHardware(volumeAvailable = false),
-            enabled = { true },
+            hardwareEnabled = { true },
+            volumeEnabled = { true },
         ).call(DeviceToolSet.VOLUME_TOOL, JSONObject().put("volume", 30))
         assertTrue(failureText(outcome).contains("没有可用的音量控制"))
     }
@@ -310,7 +463,7 @@ class DeviceToolSetTest {
     @Test
     fun `disabled feature refuses the volume tool too`() {
         val message = failureText(
-            tools(enabled = false).call(
+            tools(general = false).call(
                 DeviceToolSet.VOLUME_TOOL,
                 JSONObject().put("volume", 30),
             ),

@@ -2,6 +2,7 @@ package me.xiaozhi.androidclient.scheduling
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -34,5 +35,18 @@ class SupervisionPolicyTest {
     @Test
     fun `legacy waiting verification is recovered as verifying`() {
         assertEquals(SupervisionPhase.VERIFYING, SupervisionPolicy.migrateLegacyPhase(checkCount = 2, hasDueTime = false))
+    }
+
+    @Test
+    fun `an enabled camera verifies as usual`() {
+        assertNull(SupervisionPolicy.skipReasonWhenCameraDisabled(cameraEnabled = true))
+    }
+
+    @Test
+    fun `a disabled camera skips verification with a reason the model can repeat`() {
+        // 监督核验是**设备自己**到点发起拍照的，不查 tools/list——所以"关掉相机"
+        // 必须在执行期真的短路，否则界面上写着"拍照已关闭"却还在拍用户。
+        val reason = SupervisionPolicy.skipReasonWhenCameraDisabled(cameraEnabled = false)
+        assertEquals("相机已被用户关闭", reason)
     }
 }

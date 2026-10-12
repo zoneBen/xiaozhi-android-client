@@ -25,11 +25,24 @@ import org.json.JSONObject
  * 是台 Android 设备就有。所以非 TV5701 的机器上，开关打开后只会多出音量工具，
  * 云台和补光灯那两条不会声明——可用性各自探测，不互相拖累。
  *
+ * ## 两个开关（2026-10-12 拆分）
+ *
+ * 原先只有一个总开关，把"硬件事实"和"用户意愿"混在一起了：用户为了关掉云台，
+ * 得连媒体音量一起牺牲，而音量任何 Android 设备都有。现在分成两组：
+ *
+ *  - [hardwareEnabled]：云台 / 补光灯 / 红外灯——只有特定板子才有的东西；
+ *  - [volumeEnabled]：媒体音量。
+ *
+ * [STATUS_TOOL] 是两组**共用**的入口，所以它的归属要单独想：只要还有一组"**真的**能报"
+ * （开着 **且** 本机有对应硬件）就放行，报的内容也只含那一组（见 [callStatus]）。写成"两道闸
+ * 一起卡"的话，只关掉硬件那组时一次"现在音量多少"的调用会被连坐拒掉；只看用户开关的话，
+ * 一台没有云台灯的机器把音量关掉后会得到一句空回复——两个坑都踩过，见 [call]。
+ *
  * ## 可关闭（用户明确要求）
  *
- * [enabled] 为 false 时 [schemas] 返回空——**这几个工具压根不向服务端声明**，
- * 模型不知道它们存在，就不可能误动作。会话中途关掉的话，服务端手里的旧列表还可能调过来，
- * 那时 [call] 会回一句"已关闭"，不会真的动硬件。
+ * 某一组为 false 时，属于它的工具压根不向服务端声明，模型不知道它们存在，
+ * 就不可能误动作。会话中途关掉的话，服务端手里的旧列表还可能调过来，
+ * 那时 [call] 会回一句"已被用户关闭"，不会真的动硬件。
  *
  * ## 为什么单独一个类、不塞进 [McpCameraServer]
  *
@@ -39,41 +52,99 @@ import org.json.JSONObject
 class DeviceToolSet(
     private val hardware: PanelHardware,
     private val volume: VolumeHardware,
-    private val enabled: () -> Boolean,
+    /** 用户有没有开着云台 / 补光灯这一组。每次调用现读，中途切换立即生效。 */
+    private val hardwareEnabled: () -> Boolean,
+    /** 用户有没有开着媒体音量这一组。 */
+    private val volumeEnabled: () -> Boolean,
 ) {
     /** 本工具集认领的工具名。 */
     val toolNames: Set<String> = setOf(GIMBAL_TOOL, LIGHT_TOOL, VOLUME_TOOL, STATUS_TOOL)
 
     fun isDeviceTool(name: String): Boolean = name in toolNames
 
-    /** 声明给服务端的工具定义。功能关掉、或这台机器没有对应硬件时不声明。 */
+    /**
+     * 这一刻到底有哪些工具有效（组开着 **且** 本机有对应硬件）。
+     *
+     * 一次调用里只算一次：开关值中途变化时，同一份回复里前后不能自相矛盾
+     * （比如声明了云台、描述里却不含云台）。
+     */
+    private fun activeGroups(): ActiveGroups {
+        val hardwareOn = hardwareEnabled()
+        val volumeOn = volumeEnabled()
+        return activeGroups(hardwareOn, volumeOn)
+    }
+
+    /** 用户开关已经读到手时用这个重载，免得同一个判断里再读一遍（读两次就会读到两个值）。 */
+    private fun activeGroups(hardwareOn: Boolean, volumeOn: Boolean): ActiveGroups = ActiveGroups(
+        gimbal = hardwareOn && hardware.gimbalAvailable,
+        light = hardwareOn && hardware.lightAvailable,
+        volume = volumeOn && volume.volumeAvailable,
+    )
+
+    /** 声明给服务端的工具定义。没开、或这台机器没对应硬件时不声明。 */
     fun schemas(): List<JSONObject> {
-        if (!enabled()) return emptyList()
+        val groups = activeGroups()
         return buildList {
-            if (hardware.gimbalAvailable) add(gimbalSchema())
-            if (hardware.lightAvailable) add(lightSchema())
-            if (volume.volumeAvailable) add(volumeSchema())
-            // 状态工具只要有**任何**一样能报的东西就声明：它现在是云台、灯、音量三合一的入口，
+            if (groups.gimbal) add(gimbalSchema())
+            if (groups.light) add(lightSchema())
+            if (groups.volume) add(volumeSchema())
+            // 状态工具只要有**任何**一样能报的东西就声明：它是云台、灯、音量三合一的入口，
             // 也是模型做"大一点/取消静音"这类相对操作前必须先查的地方。
-            if (hardware.gimbalAvailable || hardware.lightAvailable || volume.volumeAvailable) {
-                add(statusSchema())
-            }
+            if (groups.any) add(statusSchema(groups))
         }
+    }
+
+    /**
+     * 这一刻被**用户**关掉的组名，供日志如实说明"哪些工具是用户关掉的"。
+     *
+     * 和 [schemas] 返回空列表**不是一回事**：一台没有云台和补光灯的机器上，硬件那组开关
+     * 即使是开的，也不会声明任何工具。日志把"机器没有"说成"用户关的"，用户就会去设置页
+     * 找一个在这台机器上本来就点不动的开关——那正是这次拆分要消掉的那种谎话。
+     */
+    fun userDisabledLabels(): List<String> = buildList {
+        if (!hardwareEnabled()) add("云台与补光灯")
+        if (!volumeEnabled()) add("音量")
     }
 
     fun call(name: String, args: JSONObject): DeviceToolOutcome {
         if (!isDeviceTool(name)) {
             return DeviceToolOutcome.Failure("Unknown tool: $name")
         }
-        if (!enabled()) {
-            // 会话中途关掉的情况：服务端手里还是旧列表，所以这条必须真的拦住。
-            return DeviceToolOutcome.Failure("本机的本地设备控制已被用户关闭，无法操作云台、灯光和音量。")
+        // 本次调用只看一次快照：下面拦的、挑拒绝语的、[callStatus] 报的，必须是同一份判断。
+        // 各读一次的话，正赶上用户切开关就会自相矛盾（拦住说"关着"，报出来却是"开着"）。
+        val hardwareOn = hardwareEnabled()
+        val volumeOn = volumeEnabled()
+        val groups = activeGroups(hardwareOn, volumeOn)
+        // 会话中途关掉的情况：服务端手里还是旧列表，所以这条必须真的拦住。
+        // 按工具**所属的那一组**拦，不是一道总闸——只关掉硬件那组时，
+        // 一次"现在音量多少"的 status 调用不该被连坐。
+        val rejection = when (name) {
+            GIMBAL_TOOL, LIGHT_TOOL ->
+                if (hardwareOn) null else HARDWARE_DISABLED_MESSAGE
+            VOLUME_TOOL ->
+                if (volumeOn) null else VOLUME_DISABLED_MESSAGE
+            // 两组共用的入口。判据是 [groups].any——也就是"**真的**有东西可报"，
+            // 不是"用户开关开着"。
+            //
+            // 看开关会漏掉一台很常见的机器：没有云台也没有灯（比如手机）、
+            // 而用户又把「拍照与音量」关掉了。那时 `hardwareOn` 仍默认是 true，
+            // 总闸放行，`callStatus()` 却拼出一个空列表，回给模型一句光秃秃的
+            // 「。」——一个什么都没说的"成功"，比拒绝还糟。
+            else -> when {
+                groups.any -> null
+                // 开关开着、本机却没有对应硬件：如实说没有，别推给"用户关的"。
+                hardwareOn || volumeOn -> NOTHING_REPORTABLE_MESSAGE
+                else -> DEFAULT_DISABLED_MESSAGE
+            }
+        }
+        if (rejection != null) {
+            return DeviceToolOutcome.Failure(rejection)
         }
         return when (name) {
             GIMBAL_TOOL -> callGimbal(args)
             LIGHT_TOOL -> callLight(args)
             VOLUME_TOOL -> callVolume(args)
-            else -> callStatus()
+            else -> callStatus(groups)
         }
     }
 
@@ -177,19 +248,33 @@ class DeviceToolSet(
         return "媒体音量已调到 0，也就是静音$note。"
     }
 
-    private fun callStatus(): DeviceToolOutcome {
+    /**
+     * 状态回复只拼"开着且本机有"的那几段。
+     *
+     * 三个地方不能想当然：
+     *  - 关掉的那组**整段不出现**，不是报"本机没有云台"。那台机器可能明明有云台、只是被
+     *    用户关了，报成"没有"会把用户引去查线；
+     *  - 补光灯那几行原来是无条件拼进去的，分组之后必须跟着 [ActiveGroups.light] 走；
+     *  - [groups] 由 [call] 算好传进来，**不在这里现读**。各读一次的话，正赶上用户切开关
+     *    就会出现"拦的时候说得通、报的时候对不上"的回复。
+     *
+     * 传进来的 [groups] 保证 `.any` 为真（见 [call] 的 STATUS 分支），所以不会拼出空串。
+     */
+    private fun callStatus(groups: ActiveGroups): DeviceToolOutcome {
         val snapshot = hardware.snapshot()
         val parts = mutableListOf<String>()
-        if (hardware.gimbalAvailable) {
+        if (groups.gimbal) {
             val rotating = if (snapshot.rotating) "，正在转动" else ""
             parts += "云台角度 ${snapshot.angleDegrees} 度$rotating"
-        } else {
-            parts += "本机没有云台"
         }
-        parts += "下方补光灯：${snapshot.bottomLightOn.onOffText()}"
-        parts += "顶部补光灯：${snapshot.topLightOn.onOffText()}"
-        parts += "红外灯：${snapshot.infraredOn.onOffText()}"
-        parts += volumeStatusText()
+        if (groups.light) {
+            parts += "下方补光灯：${snapshot.bottomLightOn.onOffText()}"
+            parts += "顶部补光灯：${snapshot.topLightOn.onOffText()}"
+            parts += "红外灯：${snapshot.infraredOn.onOffText()}"
+        }
+        if (groups.volume) {
+            parts += volumeStatusText()
+        }
         return DeviceToolOutcome.Success(parts.joinToString("；") + "。")
     }
 
@@ -314,18 +399,37 @@ class DeviceToolSet(
                 .put("required", JSONArray().put("volume")),
         )
 
-    private fun statusSchema() = JSONObject()
-        .put("name", STATUS_TOOL)
-        .put(
-            "description",
-            "查询这台设备的硬件状态：云台现在在多少度、有没有在转，两盏补光灯和红外灯是开还是关，" +
-                "以及当前媒体音量。用户问「云台现在朝哪」「灯开着吗」「现在音量多少」时调用，" +
-                "也是调整音量和取消静音之前的必要一步。",
-        )
-        .put(
-            "inputSchema",
-            JSONObject().put("type", "object").put("properties", JSONObject()),
-        )
+    /**
+     * 状态工具。描述按**这一刻真正声明了哪几组**现拼。
+     *
+     * 原来写死了"云台…补光灯…红外灯…媒体音量"，只声明一组时会过度承诺：
+     * 模型会照着描述去问"灯开着吗"，而本机根本报不出这一项。"调整音量之前必须先查"
+     * 那句同理，只在音量真的可查时才成立。
+     */
+    private fun statusSchema(groups: ActiveGroups): JSONObject {
+        val topics = buildList {
+            if (groups.gimbal) add("云台现在在多少度、有没有在转")
+            if (groups.light) add("两盏补光灯和红外灯是开还是关")
+            if (groups.volume) add("当前媒体音量")
+        }
+        val examples = buildList {
+            if (groups.gimbal) add("「云台现在朝哪」")
+            if (groups.light) add("「灯开着吗」")
+            if (groups.volume) add("「现在音量多少」")
+        }
+        val volumeHint = if (groups.volume) "也是调整音量和取消静音之前的必要一步。" else ""
+        return JSONObject()
+            .put("name", STATUS_TOOL)
+            .put(
+                "description",
+                "查询这台设备的硬件状态：${topics.joinToString("，")}。" +
+                    "用户问 ${examples.joinToString("")} 时调用。$volumeHint",
+            )
+            .put(
+                "inputSchema",
+                JSONObject().put("type", "object").put("properties", JSONObject()),
+            )
+    }
 
     companion object {
         const val GIMBAL_TOOL = "self.device.gimbal"
@@ -334,7 +438,36 @@ class DeviceToolSet(
         /** 和 ESP32 同名同参数，便于复用服务端提示词。 */
         const val VOLUME_TOOL = "self.audio_speaker.set_volume"
         const val STATUS_TOOL = "self.device.status"
+
+        // 拒绝文案按组分开写：一句话盖两组的话，模型没法向用户复述到底是哪一项被关了。
+        // 前三条**都保留"已被用户关闭"这个子串**——它是"关掉之后真的拦住了"的可观测标记，
+        // 被日志断言和单测用着。
+        const val HARDWARE_DISABLED_MESSAGE: String =
+            "本机的云台与补光灯控制已被用户关闭，无法操作云台和灯光。"
+        const val VOLUME_DISABLED_MESSAGE: String =
+            "本机的音量控制已被用户关闭，无法调节媒体音量。"
+        const val DEFAULT_DISABLED_MESSAGE: String =
+            "本机的本地设备控制已被用户关闭，无法操作云台、灯光和音量。"
+
+        /**
+         * 开关**开着**、本机却没有任何一样能报的状态。
+         *
+         * 常见于手机：没有云台也没有灯，用户又把「拍照与音量」关了。这时说"已被用户关闭"
+         * 是假话——用户关掉的只是音量那一组，云台是这台机器本来就没有。所以单独一句。
+         */
+        const val NOTHING_REPORTABLE_MESSAGE: String =
+            "本机没有可查询的本地设备状态：这台机器没有云台和补光灯，音量控制也已被用户关闭。"
     }
+}
+
+/** 这一刻哪些工具有效：[PanelHardware] / [VolumeHardware] 的在位与否，与两个用户开关的与。 */
+private data class ActiveGroups(
+    val gimbal: Boolean,
+    val light: Boolean,
+    val volume: Boolean,
+) {
+    /** 有任何一样能报的东西。 */
+    val any: Boolean get() = gimbal || light || volume
 }
 
 /** 工具执行结果。失败走 JSON-RPC 的 error，让模型自己决定怎么跟用户说。 */

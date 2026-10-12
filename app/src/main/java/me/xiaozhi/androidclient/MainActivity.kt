@@ -90,6 +90,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
@@ -118,6 +119,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import coil.compose.AsyncImage
 import me.xiaozhi.androidclient.audio.SherpaWakeWordRecognizer
+import me.xiaozhi.androidclient.camera.CameraFacing
 import me.xiaozhi.androidclient.model.ChatMessage
 import me.xiaozhi.androidclient.model.ChatRole
 import me.xiaozhi.androidclient.model.ConnectionStatus
@@ -162,6 +164,14 @@ private val BrandAccentSoft = Color(0xFFDCE8FF)
  * 因为它是数字人画面上唯一一个需要在「正在播报」的瞬间被一眼找到的控件。
  */
 private val InterruptRed = Color(0xFFE53935)
+
+/**
+ * 本机没有对应硬件时，设置页那一行降到的透明度。
+ *
+ * 0.45 是"明显比别处淡、但还读得清副标题里那句原因"的位置——**原因必须还读得清**，
+ * 否则用户看到的只是一个点不动的开关，猜不出为什么。
+ */
+private const val DISABLED_ROW_ALPHA = 0.45f
 
 /**
  * 全局文字放大系数。测试者第一条反馈就是“字体有点小”，
@@ -564,6 +574,9 @@ private fun XiaozhiApp() {
         onClearRolePortrait = { roleId -> viewModel.clearRolePortrait(roleId) },
         onClearRoleVideo = { roleId, slot -> viewModel.clearRoleVideo(roleId, slot) },
         onDeviceControlEnabledChanged = viewModel::updateDeviceControlEnabled,
+        onHardwareControlEnabledChanged = viewModel::updateHardwareControlEnabled,
+        onCameraFacingChanged = viewModel::updateCameraFacing,
+        onRefreshCameraFacings = viewModel::refreshCameraFacings,
     )
     if (uploadSession != null) {
         UploadQrDialog(
@@ -666,6 +679,9 @@ private fun XiaozhiScreen(
     onClearRolePortrait: (String) -> Unit,
     onClearRoleVideo: (String, DigitalHumanSlot) -> Unit,
     onDeviceControlEnabledChanged: (Boolean) -> Unit,
+    onHardwareControlEnabledChanged: (Boolean) -> Unit,
+    onCameraFacingChanged: (CameraFacing) -> Unit,
+    onRefreshCameraFacings: () -> Unit,
 ) {
     var everConnected by rememberSaveable { mutableStateOf(false) }
     var startupGraceElapsed by rememberSaveable { mutableStateOf(false) }
@@ -682,6 +698,17 @@ private fun XiaozhiScreen(
     LaunchedEffect(Unit) {
         delay(STARTUP_OVERLAY_TIMEOUT_MS)
         startupGraceElapsed = true
+    }
+    // 进设置页时重查一次"本机内置摄像头有哪几个朝向"。
+    //
+    // init 里查过一遍了，但那一遍**可能是短的一版**：它跑得很早，相机服务未必就绪，
+    // 失败会被吞成空列表，而界面上的表现就是前/后置那一行永远不出现。
+    // （这台设备上反复出现过"USB 相机插上之后 `cameraIdList` 才多出那一项"，
+    // 说明枚举本身就有前后不一致的时候。）每次打开设置页重查，给这种一次性失败一个自愈机会。
+    //
+    // 只查内置的朝向，所以外接相机既不会被列进来，也不会让选项凭空多出或少掉一项。
+    LaunchedEffect(currentScreen) {
+        if (currentScreen == AppScreen.SETTINGS) onRefreshCameraFacings()
     }
     // 用户看到麦克风自检失败的提示后，可以主动收起这层继续用（避免卡死）。
     var startupOverlayDismissed by rememberSaveable { mutableStateOf(false) }
@@ -776,6 +803,8 @@ private fun XiaozhiScreen(
                         onClearRolePortrait = onClearRolePortrait,
                         onClearRoleVideo = onClearRoleVideo,
                         onDeviceControlEnabledChanged = onDeviceControlEnabledChanged,
+                        onHardwareControlEnabledChanged = onHardwareControlEnabledChanged,
+                        onCameraFacingChanged = onCameraFacingChanged,
                     )
                 }
             }
@@ -1438,6 +1467,8 @@ private fun SettingsScreen(
     onClearRolePortrait: (String) -> Unit,
     onClearRoleVideo: (String, DigitalHumanSlot) -> Unit,
     onDeviceControlEnabledChanged: (Boolean) -> Unit,
+    onHardwareControlEnabledChanged: (Boolean) -> Unit,
+    onCameraFacingChanged: (CameraFacing) -> Unit,
 ) {
     val scrollState = rememberScrollState()
 
@@ -1474,35 +1505,86 @@ private fun SettingsScreen(
         DeviceControlCard(
             state = state,
             onDeviceControlEnabledChanged = onDeviceControlEnabledChanged,
+            onHardwareControlEnabledChanged = onHardwareControlEnabledChanged,
+            onCameraFacingChanged = onCameraFacingChanged,
         )
     }
 }
 
 /**
- * 本地设备控制卡片：一个总开关，加一行本机硬件的自检结果。
+ * 设备控制卡片：**两个**开关，加一行本机硬件的自检结果。
  *
- * 为什么要把自检结果摆到界面上：云台和补光灯都是靠厂商挂在 `PowerManager` 上的扩展方法
- * 反射调用的（见 `BodyGuargzController`），这台机器认不认只能实测。把结论写在这儿，
- * 现场的人一眼就能分清"是功能没开"还是"这台机器压根没有这个硬件"——否则只会看到
- * "叫它转它不转"，然后以为 App 坏了。
+ * ## 为什么是两个开关（2026-10-12 拆分）
+ *
+ * 原先只有一个总开关，把"硬件事实"和"用户意愿"混在了一起。实测暴露两件事：
+ *
+ *  1. 在没认出云台和补光灯的机器上（比如现在这台 OnePlus），它照样显示为**打开**，
+ *     可实际它只等于"能调音量"——**开关在撒谎**；
+ *  2. 用户为了关掉云台，得连媒体音量一起牺牲，而音量任何 Android 设备都有。
+ *
+ * 所以按「通用 / 硬件强相关」分成两组，并让硬件那个开关在**本机没这个硬件时置灰**——
+ * 留着能点等于骗用户，打开也没东西可控制。
+ *
+ * ## 为什么要把自检结果摆到界面上
+ *
+ * 云台和补光灯都是靠厂商挂在 `PowerManager` 上的扩展方法反射调用的（见
+ * `BodyGuargzController`），这台机器认不认只能实测。把结论写在这儿，现场的人一眼就能
+ * 分清"是功能没开"还是"这台机器压根没有这个硬件"——否则只会看到"叫它转它不转"，
+ * 然后以为 App 坏了。
  */
 @Composable
 private fun DeviceControlCard(
     state: UiState,
     onDeviceControlEnabledChanged: (Boolean) -> Unit,
+    onHardwareControlEnabledChanged: (Boolean) -> Unit,
+    onCameraFacingChanged: (CameraFacing) -> Unit,
 ) {
     SettingsCard {
         SettingsSwitch(
-            icon = "🎥",
-            title = "本地设备控制",
-            subtitle = "允许小智用语音控制摄像头云台、补光灯和媒体音量，比如「左转」「打开灯光」「声音小一点」。关掉后这些指令不再下发给设备。",
+            icon = "📷",
+            title = "拍照与音量",
+            subtitle = "允许小智拍照看画面、调节媒体音量，比如「看看这是什么」「声音小一点」。" +
+                "关掉后小智不能拍照，定时监督也不再拍照核对，只会照常提醒你。",
             checked = state.deviceControlEnabled,
             onCheckedChange = onDeviceControlEnabledChanged,
         )
+
+        // 前置 / 后置。本机只有一个朝向时不显示——没得选的选择器只是在浪费用户的时间。
+        if (state.cameraFacingChoices.size > 1) {
+            HorizontalDivider()
+            SettingsChoice(
+                icon = "🔄",
+                title = "用哪个摄像头",
+                subtitle = "本机有${state.cameraFacingChoices.joinToString("和") { it.label }}摄像头。" +
+                    "接上 USB 摄像头时优先用它。",
+                options = state.cameraFacingChoices.map { it.label to (it == state.cameraFacing) },
+                onSelect = { index -> onCameraFacingChanged(state.cameraFacingChoices[index]) },
+            )
+        }
+
+        HorizontalDivider()
+        SettingsSwitch(
+            icon = "🕹️",
+            title = "云台与补光灯",
+            // 说「没认出」而不是「没有」：这里证的是**厂商标商接口在不在**，
+            // 不是灯和电机在不在——一台机器可能接口在、硬件不在。写「没有」是把话说满了。
+            subtitle = if (state.hardwareControlAvailable) {
+                "允许小智转动摄像头云台、开关补光灯和红外灯，比如「左转」「打开灯光」。" +
+                    "关掉后会立刻关灯并把云台停住。"
+            } else {
+                "本机没认出云台和补光灯，这个开关在这里用不上。"
+            },
+            // 没硬件时显示的是**实际生效状态**（关），不是用户存的那个值（开）；
+            // 存的值不动，将来插到真有云台的板子上照样是开的。
+            checked = state.hardwareControlEnabled && state.hardwareControlAvailable,
+            onCheckedChange = onHardwareControlEnabledChanged,
+            enabled = state.hardwareControlAvailable,
+        )
+
         HorizontalDivider()
         SettingsStatus(
-            icon = if (state.deviceControlEnabled) "🔧" else "🚫",
-            title = if (state.deviceControlEnabled) "本机硬件自检" else "本机硬件自检（功能已关闭）",
+            icon = if (state.deviceControlEnabled || state.hardwareControlEnabled) "🔧" else "🚫",
+            title = "本机硬件自检",
             subtitle = state.deviceControlStatus.ifBlank { "正在检测本机的云台、补光灯和音量…" },
         )
     }
@@ -2525,10 +2607,16 @@ private fun SettingsSwitch(
     subtitle: String,
     checked: Boolean,
     onCheckedChange: (Boolean) -> Unit,
+    /** false = 本机没这个硬件，整行变淡且开关点不动。副标题要写明为什么。 */
+    enabled: Boolean = true,
 ) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
+            // 置灰靠整行降透明度 + 把 enabled 透传给 Switch：
+            // Switch(enabled = false) 自带正确的不可点语义和无障碍信息，
+            // 只把它画淡而不传 enabled 的话，读屏软件仍然会念成"可切换"。
+            .alpha(if (enabled) 1f else DISABLED_ROW_ALPHA)
             .padding(horizontal = 16.dp, vertical = 16.dp),
         horizontalArrangement = Arrangement.spacedBy(14.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -2545,7 +2633,70 @@ private fun SettingsSwitch(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
-        Switch(checked = checked, onCheckedChange = onCheckedChange)
+        Switch(checked = checked, onCheckedChange = onCheckedChange, enabled = enabled)
+    }
+}
+
+/**
+ * 一行两选一（目前用于"用前置还是后置摄像头"）。
+ *
+ * 项目里没有 FilterChip / SegmentedButton / RadioButton 可用，而 `RoleProfileRow` 那套
+ * "整行可点 + 「当前」标记"是给长列表用的。两个选项摆成一对胶囊更直白：
+ * 选中那个用品牌浅蓝底 + 品牌蓝字，未选中那个留白。
+ *
+ * 只在**真的有得选**的时候才显示（摄像头朝向少于两个时调用方直接不渲染这一行）——
+ * 一个只有一个选项的选择器是在浪费用户的时间。
+ */
+@Composable
+private fun SettingsChoice(
+    icon: String,
+    title: String,
+    subtitle: String,
+    options: List<Pair<String, Boolean>>,
+    onSelect: (Int) -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 16.dp),
+        horizontalArrangement = Arrangement.spacedBy(14.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(text = icon)
+        Column(
+            modifier = Modifier.weight(1f),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            Text(text = title, fontWeight = FontWeight.SemiBold)
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                options.forEachIndexed { index, (label, selected) ->
+                    ChoiceChip(label = label, selected = selected) { onSelect(index) }
+                }
+            }
+            Text(
+                text = subtitle,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
+}
+
+/** [SettingsChoice] 里的单个胶囊。样式照 `DigitalHumanSwitchChip`，换了选中态。 */
+@Composable
+private fun ChoiceChip(label: String, selected: Boolean, onClick: () -> Unit) {
+    Surface(
+        color = if (selected) BrandAccentSoft else Color.White,
+        shape = RoundedCornerShape(18.dp),
+        border = BorderStroke(1.dp, if (selected) BrandAccent else SettingsBackground),
+        modifier = Modifier.clickable(onClick = onClick),
+    ) {
+        Text(
+            text = label,
+            style = MaterialTheme.typography.labelLarge,
+            color = if (selected) BrandAccent else MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+        )
     }
 }
 

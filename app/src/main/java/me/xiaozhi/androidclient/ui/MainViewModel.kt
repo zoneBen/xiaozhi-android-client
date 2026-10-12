@@ -23,6 +23,7 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlin.math.min
 import me.xiaozhi.androidclient.audio.XiaozhiAudioEngine
+import me.xiaozhi.androidclient.camera.CameraFacing
 import me.xiaozhi.androidclient.camera.CameraVisionTool
 import me.xiaozhi.androidclient.data.AppPreferences
 import me.xiaozhi.androidclient.data.RoleProfileRepository
@@ -168,6 +169,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         deviceId = { activeRoleProfile().deviceId },
         clientId = { activeRoleProfile().clientId },
         onPhotoCaptured = { file -> addPhotoMessage(file) },
+        preferredFacing = { uiState.value.cameraFacing },
+        // 拍照的总闸收在工具自己身上，不在调用的地方：监督核验那条路不查 tools/list，
+        // 只拦 MCP 那一层等于"界面上关了、设备照样在拍"。
+        enabled = { uiState.value.deviceControlEnabled },
     )
     private var pendingActivationInfo: ActivationInfo? = null
     private var pendingListeningMode: ListeningMode? = null
@@ -264,7 +269,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val deviceToolSet = DeviceToolSet(
         hardware = bodyGuargzController,
         volume = systemVolumeController,
-        enabled = { uiState.value.deviceControlEnabled },
+        hardwareEnabled = { uiState.value.hardwareControlEnabled },
+        volumeEnabled = { uiState.value.deviceControlEnabled },
     )
 
     private val mcpCameraServer = McpCameraServer(
@@ -283,6 +289,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             activeScheduledPrompt?.text?.startsWith(SUPERVISION_START_CODE_PHRASE) == true
         },
         deviceToolSet = deviceToolSet,
+        cameraEnabled = { uiState.value.deviceControlEnabled },
         pendingUserMessage = ::takePendingUserMessage,
         log = ::addLog,
     )
@@ -308,8 +315,25 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         // 这台机器上到底认没认出来，是这一版最需要真机确认的一件事。
         addLog("本地设备控制：${bodyGuargzController.describe()}")
         addLog("媒体音量：${systemVolumeController.availabilityLabel()}，当前 ${systemVolumeController.volumePercent() ?: "读不到"}%")
+        // 认不认得出云台/补光灯是**构造时反射解析**的结果，进程生命周期内不变，所以探一次就够。
+        // 设置页靠它决定硬件开关要不要置灰。
+        val hardwareAvailable = bodyGuargzController.gimbalAvailable || bodyGuargzController.lightAvailable
+        addLog("本机硬件开关${if (hardwareAvailable) "可用" else "置灰"}：hardwareControlAvailable=$hardwareAvailable")
+        // 两个开关的**实际生效值**也记一条。它是升级迁移唯一的可观测点：
+        // 老装机上 `hardware_control_enabled` 这个键还不存在，值是从老总开关继承来的
+        // （见 AppPreferences.load），光看设置页分不清"继承对了"还是"默认成了 true"——
+        // 而这台机器上硬件那组本来就是置灰的，界面上两种情况长得一模一样。
+        addLog(
+            "本地设备控制开关：拍照与音量=${uiState.value.deviceControlEnabled}，" +
+                "云台与补光灯=${uiState.value.hardwareControlEnabled}",
+        )
         updateState {
             copy(
+                hardwareControlAvailable = hardwareAvailable,
+                cameraFacingChoices = cameraVisionTool.availableBuiltinFacings(),
+                // 这一句只说**硬件事实**（本机有没有这个硬件），不掺开关状态。
+                // 掺进来就有三处要跟着开关重算（这里 + 两个 setter），迟早有一处漏掉、
+                // 变成一行对着开关撒谎的旧文案。开关状态由上面那两行自己显示。
                 deviceControlStatus = listOf(
                     bodyGuargzController.availabilityLabel(),
                     systemVolumeController.availabilityLabel(),
@@ -1089,27 +1113,92 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
-     * 开关本地设备控制（云台 / 补光灯）。
+     * 开关**通用功能**：摄像头拍照 + 媒体音量。
+     *
+     * 这一组关掉时**不需要**把什么拉回安全状态：相机拍完就完，音量用户随时能用音量键改。
+     * （原来这里是总开关，带着 `releaseAll()`；那个副作用现在归
+     * [updateHardwareControlEnabled]——灯和云台才真的会"留下来停不掉"。）
+     *
+     * 相机那一半还有一个不明显的后果：设备自己发起的**监督核验也会停拍**，
+     * 见 [SupervisionPolicy.skipReasonWhenCameraDisabled]。不这么做的话，
+     * 界面上写着"拍照已关闭"、监督流程照样在拍用户。
+     */
+    fun updateDeviceControlEnabled(enabled: Boolean) {
+        updateAndPersist { copy(deviceControlEnabled = enabled) }
+        addLog(
+            if (enabled) {
+                "已开启拍照与音量（摄像头、媒体音量），下次声明工具时生效"
+            } else {
+                "已关闭拍照与音量：摄像头工具不再声明，监督提醒也不会再拍照核对；音量保持不变"
+            },
+        )
+    }
+
+    /**
+     * 开关**硬件强相关**功能：云台 / 补光灯 / 红外灯。
      *
      * 关闭时**顺手把执行器拉回安全状态**：灯灭、云台停。理由很直接——关掉之后语音通道没了，
      * 要是灯还亮着、电机还在转，用户就再没有任何办法把它停下来，只能拔电。
      * 这个副作用会写进日志，不让它是悄悄发生的。
+     *
+     * 本机没有这类硬件时设置页那个开关是置灰的，这个函数从界面走不到；
+     * 但带着它也无害——没有云台时 `releaseAll()` 自己就是空操作。
      */
-    fun updateDeviceControlEnabled(enabled: Boolean) {
-        updateAndPersist { copy(deviceControlEnabled = enabled) }
+    fun updateHardwareControlEnabled(enabled: Boolean) {
+        updateAndPersist { copy(hardwareControlEnabled = enabled) }
         if (!enabled) {
             bodyGuargzController.releaseAll()
         }
-        // 音量**故意**不跟着复位：灯亮着、云台转着没人管是真的收不了场（关掉之后语音通道
-        // 就没了），但音量用户随时可以用音量键或遥控器改，没有"停不下来"的问题；
-        // 关个开关就把音量改掉反而是替用户做了他没要求的事。
         addLog(
             if (enabled) {
-                "已开启本地设备控制（云台、补光灯、媒体音量），下次声明工具时生效"
+                "已开启云台与补光灯，下次声明工具时生效"
             } else {
-                "已关闭本地设备控制。已关闭补光灯、红外灯并停住云台；音量保持不变"
+                "已关闭云台与补光灯。已关闭补光灯、红外灯并停住云台"
             },
         )
+    }
+
+    /** 用户选了用哪一台内置摄像头（前置 / 后置）。 */
+    fun updateCameraFacing(facing: CameraFacing) {
+        if (uiState.value.cameraFacing == facing) return
+        updateAndPersist { copy(cameraFacing = facing) }
+        addLog("拍照改用${facing.label}摄像头")
+    }
+
+    /**
+     * 重查本机有几个内置摄像头朝向可选。
+     *
+     * 为什么不只在 init 里查一次：
+     *  - init 跑得很早，那时相机服务未必已经就绪，[CameraVisionTool.availableBuiltinFacings]
+     *    里的 `runCatching` 会把这一次的失败吞成空列表——而"空列表"在界面上就表现为
+     *    前/后置那一行**永远不出现**，用户没有任何办法补救。设置页每次打开时重查一次，
+     *    等于给这种一次性失败一个自愈的机会；
+     *  - 这台设备上反复出现过"USB 相机插上之后 `cameraIdList` 才多出那一项"，说明启动
+     *    那一刻的枚举本身就可能是短的一版。热插拔会逼框架重新枚举，顺带把上次漏掉的内置
+     *    项补上。
+     *
+     * 注意**不是**"外接相机能让内置选项变多"：这里只取 FRONT / BACK，外接那台既不会被列进
+     * 选项、也不会让某项凭空出现或消失。
+     *
+     * 只读系统列表、不开相机，所以随时可以调。
+     */
+    fun refreshCameraFacings() {
+        val choices = cameraVisionTool.availableBuiltinFacings()
+        if (choices == uiState.value.cameraFacingChoices) return
+        // 存着的朝向在这台机器上不存在（比如配置从别的机器搬过来），退回第一项，
+        // 否则设置页会显示一个当场不成立的选中项。
+        val stored = uiState.value.cameraFacing
+        val fallback = choices.firstOrNull()
+        // 这里用 updateAndPersist 而不是 updateState：上面那个 fallback 会把**持久化的**
+        // cameraFacing 改掉（配置搬机器的情形），不落盘的话下次启动又读回那个不成立的朝向，
+        // 设置页每次打开都要再"修正"一遍，而修正从来存不住。
+        // 提前 return 保证只有真的变了才写盘。
+        updateAndPersist {
+            copy(
+                cameraFacingChoices = choices,
+                cameraFacing = stored.takeIf { choices.isEmpty() || it in choices } ?: fallback ?: stored,
+            )
+        }
     }
 
     fun updateWakeWordStatus(status: String) {
@@ -2030,6 +2119,25 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private suspend fun runSupervisionVerification(reminder: ScheduledReminder) {
         if (reminderScheduler.supervision(reminder.id) == null) {
             addLog("排队的监督核验已失效，跳过：${reminder.message}")
+            return
+        }
+        // 相机被用户关掉时**这里就要分流**，不能靠"拍照时抛异常"兜。
+        //
+        // 兜出来的异常会落进下面的 UNCERTAIN 分支，然后走 retryOrGiveUpSupervision
+        // 排下一次核验——那条路每 30 分钟醒一次、要醒满 MAX_SUPERVISION_CHECKS 次，
+        // 每次都只能报同一句话（相机不会自己打开）；而且它**只在核验次数用尽时**
+        // 才 completeSupervision，所以没醒满之前任务一直卡在核验中不收尾。
+        //
+        // 用户既然明确关了相机，这里就一次说清并收尾，同"核验次数已用尽"的终态。
+        val skipReason = SupervisionPolicy.skipReasonWhenCameraDisabled(uiState.value.deviceControlEnabled)
+        if (skipReason != null) {
+            addLog("监督核验跳过（$skipReason），本次不拍照、也不再重试：${reminder.message}")
+            reminderScheduler.completeSupervision(reminder.id)
+            enqueueScheduledPrompt(
+                "${reminder.id}-result-${reminder.checkCount}",
+                ReminderKind.SUPERVISION,
+                "${SUPERVISION_RESULT_CODE_PHRASE}无法确认：$skipReason",
+            )
             return
         }
         addLog("监督核验到点，设备开始调用摄像头：${reminder.message}")
@@ -3007,6 +3115,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             debugLoggingEnabled = storedConfig.debugLoggingEnabled,
             debugWavDumpEnabled = storedConfig.debugWavDumpEnabled,
             deviceControlEnabled = storedConfig.deviceControlEnabled,
+            hardwareControlEnabled = storedConfig.hardwareControlEnabled,
+            cameraFacing = storedConfig.cameraFacing,
         )
     }
 
@@ -3039,6 +3149,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 debugLoggingEnabled = uiState.value.debugLoggingEnabled,
                 debugWavDumpEnabled = uiState.value.debugWavDumpEnabled,
                 deviceControlEnabled = uiState.value.deviceControlEnabled,
+                hardwareControlEnabled = uiState.value.hardwareControlEnabled,
+                cameraFacing = uiState.value.cameraFacing,
             ),
         )
     }

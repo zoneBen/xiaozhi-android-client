@@ -18,7 +18,8 @@ package me.xiaozhi.androidclient.camera
  *
  * ## 选摄像头的规则
  *
- * 有外接就还选外接（保住 RK3568 的既有行为），没有就用第一台。[enumerate] 照
+ * 有外接就还选外接（保住 RK3568 的既有行为），没有就在用户选的那个朝向里挑，
+ * 用户没得选（本机只有一个朝向）时用第一台。[enumerate] 照
  * `workdayAlarmClockAndroid` 的 `AvcCameraPipeline` 那样**按索引枚举全部摄像头**，
  * 不拿 `LENS_FACING` 当门槛——那个项目在 TV5701 上能出图，正是因为没设这道门槛。
  *
@@ -27,8 +28,9 @@ package me.xiaozhi.androidclient.camera
  * 外接 UVC 模组上报的 `SENSOR_ORIENTATION` 是 0，可它在整机里是**倒装**的——
  * 这件事 API 里查不到，只能写死 [EXTERNAL_MODULE_PIXEL_ROTATION_DEGREES]（沿用原实现）。
  *
- * 内建摄像头不一样：`SENSOR_ORIENTATION` 是可信的，按标准公式和**当前屏幕方向**相减
- * 就是该转的角度，不该再写死一个数——写死 180 只对那一个模组成立。
+ * 内建摄像头不一样：`SENSOR_ORIENTATION` 是可信的，按标准公式和**当前屏幕方向**
+ * 算就是该转的角度，不该再写死一个数——写死 180 只对那一个模组成立。
+ * 前置和后置的公式差一个符号（见 [pixelRotationDegrees]），2026-10-12 补上。
  *
  * ## 分辨率：别写死
  *
@@ -50,24 +52,48 @@ object CameraSelection {
     val PREFERRED_JPEG_SIZE = FrameSize(1280, 720)
 
     /**
-     * 挑一台摄像头：**优先外接**（保住 RK3568 的行为），否则第一台。
+     * 挑一台摄像头：**优先外接**（保住 RK3568 的行为），否则用户选的那个朝向，
+     * 否则第一台。
+     *
+     * 外接排在最前面是**刻意**的，不是没来得及改：RK3568 上麦克风和摄像头是同一个 USB
+     * 设备（见 `InputDeviceSelector`），那台机器上外接相机是唯一能出图的一台，
+     * 让"用户偏好"压过它只会把能用的那台换掉。反过来，本机只有内置摄像头时
+     * （手机、平板）外接那一条根本不命中，用户的选择才有意义。
      *
      * 一台都没有时返回 null，由调用方决定报什么错——这里不抛异常，好单测。
      */
-    fun choose(candidates: List<CameraCandidate>): CameraCandidate? =
-        candidates.firstOrNull { it.isExternal } ?: candidates.firstOrNull()
+    fun choose(
+        candidates: List<CameraCandidate>,
+        preferred: CameraFacing = CameraFacing.BACK,
+    ): CameraCandidate? =
+        candidates.firstOrNull { it.isExternal }
+            ?: candidates.firstOrNull { it.facing == preferred }
+            ?: candidates.firstOrNull()
 
     /**
-     * 传感器方向 + 屏幕方向的映射，得到"还要转多少度"。
+     * 传感器方向 + 屏幕方向的映射，得到"还要转多少度"（顺时针）。
      *
-     * 外接走那个写死的倒装角；内建用标准公式 `(传感器 - 屏幕 + 360) % 360`
-     * （后置摄像头的公式，本机只有后置，前置还要额外镜像，这轮不涉及）。
+     * 外接走那个写死的倒装角；内建按标准公式：后置 `(传感器 - 屏幕 + 360) % 360`，
+     * 前置 `(传感器 + 屏幕) % 360`。
+     *
+     * 前置**只转不镜像**。相机的标准自拍管线是"先镜像再旋转"，但这里删掉镜像那一步，
+     * 因为这个画面不是给人看自拍的，是给视觉模型读的：镜像会把画面里的文字、招牌、
+     * 书页、仪表盘全翻过来，那比"左右反了"严重得多。删掉镜像不影响角度——
+     * 镜像与旋转可交换（`M ∘ R(θ) = R(-θ) ∘ M`），所以标准前置公式 `(传感器 + 屏幕)`
+     * 原样拿来用，得到的正是**未镜像且摆正**的那张图。
+     *
+     * 方向核对过：唯一真正转像素的是 `CameraVisionTool.rotatePixels`，它用
+     * `Matrix.postRotate`，正角度即顺时针，和上面这套公式的约定一致。
      */
     fun pixelRotationDegrees(candidate: CameraCandidate, deviceRotationDegrees: Int): Int =
-        if (candidate.isExternal) {
-            EXTERNAL_MODULE_PIXEL_ROTATION_DEGREES
-        } else {
-            ((candidate.sensorOrientationDegrees - deviceRotationDegrees) % 360 + 360) % 360
+        when (candidate.facing) {
+            CameraFacing.EXTERNAL -> EXTERNAL_MODULE_PIXEL_ROTATION_DEGREES
+            CameraFacing.FRONT ->
+                ((candidate.sensorOrientationDegrees + deviceRotationDegrees) % 360 + 360) % 360
+            // UNKNOWN 落在后置这条上：现在 `LENS_FACING` 读不到时就是这个行为，
+            // 而且认不出来时按后置算总比按前置算安全（前置那套符号反了会歪得更远）。
+            CameraFacing.BACK, CameraFacing.UNKNOWN ->
+                ((candidate.sensorOrientationDegrees - deviceRotationDegrees) % 360 + 360) % 360
         }
 
     /**
@@ -109,12 +135,54 @@ object CameraSelection {
     fun choosePrimingSize(supported: List<FrameSize>): FrameSize? = supported.minByOrNull { it.area }
 }
 
-/** 枚举到的摄像头。[isExternal] 是 USB UVC，[sensorOrientationDegrees] 是 `SENSOR_ORIENTATION`。 */
+/** 摄像头的朝向。 */
+enum class CameraFacing(val label: String) {
+    /** 后置（内建）。 */
+    BACK("后置"),
+
+    /** 前置（内建）。 */
+    FRONT("前置"),
+
+    /** 外接 USB UVC。 */
+    EXTERNAL("外接"),
+
+    /**
+     * 没认出来（`LENS_FACING` 读不到、或是将来多出来的取值）。
+     *
+     * 和 [BACK] 走同一套旋转公式，但**不作为用户可选项**——认不出朝向的摄像头
+     * 摆到"用哪一个"的选择器里，用户根本不知道那指的是哪一台。
+     */
+    UNKNOWN("内建（朝向未知）"),
+    ;
+
+    companion object {
+        /**
+         * 解析用户存的偏好。**只有 [BACK] 和 [FRONT] 是合法值**，其余一律退回 [BACK]。
+         *
+         * 退回而不是报错：这个值来自 SharedPreferences，一个坏字符串不该让启动失败，
+         * 而后置是绝大多数场景下的正确默认（说「看看这是什么」指的是眼前的东西）。
+         * [EXTERNAL] 和 [UNKNOWN] 也不接受：外接是**无条件优先**的（见 `choose`），
+         * 选它没有意义；[UNKNOWN] 上面说了，不该出现在选择器里。
+         */
+        fun parsePreference(raw: String?): CameraFacing {
+            val normalized = raw?.trim()?.uppercase().orEmpty()
+            return when (normalized) {
+                FRONT.name -> FRONT
+                else -> BACK
+            }
+        }
+    }
+}
+
+/** 枚举到的摄像头。[facing] 是朝向，[sensorOrientationDegrees] 是 `SENSOR_ORIENTATION`。 */
 data class CameraCandidate(
     val id: String,
-    val isExternal: Boolean,
+    val facing: CameraFacing,
     val sensorOrientationDegrees: Int,
-)
+) {
+    /** 是不是 USB UVC。由 [facing] 派生，免得两个字段各说各话。 */
+    val isExternal: Boolean get() = facing == CameraFacing.EXTERNAL
+}
 
 /** 相机输出尺寸。 */
 data class FrameSize(val width: Int, val height: Int) {

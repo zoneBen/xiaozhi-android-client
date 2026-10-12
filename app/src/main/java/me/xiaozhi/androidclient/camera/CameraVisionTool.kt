@@ -42,6 +42,19 @@ private const val TAG = "XiaozhiClient"
 private const val PHOTO_DIR = "photos"
 
 /**
+ * 拍照被用户关掉时的拒绝语。
+ *
+ * 说的是"用户关的"而不是"出错了"——后者会让模型去劝用户检查摄像头接线。
+ *
+ * 注意**它只有一条出口了**：现在只有模型经 MCP 调 `self.camera.take_photo` 时才会读到
+ * 这句话。监督那条路（`MainViewModel.runSupervisionVerification`）在相机已关时**进入就
+ * 短路了**，根本不走到 [CameraVisionTool.takePhotoAndExplain]，它报的是
+ * `SupervisionPolicy` 自己的那句"相机已被用户关闭"。
+ * 两句话都指向同一个原因，但**不是同一个字符串**，日志断言别把它们混起来。
+ */
+internal const val CAMERA_DISABLED_MESSAGE = "本机的拍照功能已被用户关闭，无法拍照。"
+
+/**
  * 上传前把像素**真的转正**，而不是只改 EXIF 方向标签。
  *
  * 注意：不要用 `CaptureRequest.JPEG_ORIENTATION` 来做这件事——它只改 EXIF 标签、
@@ -75,6 +88,26 @@ class CameraVisionTool(
      * 各自记得。默认空实现，单测/无界面的场景不受影响。
      */
     private val onPhotoCaptured: (File) -> Unit = {},
+    /**
+     * 用户在设置里选了用哪一台内置摄像头（前置 / 后置）。
+     *
+     * 惰性读，和 [enabled] 一样每次拍摄现查：用户改完设置不该等下个会话才生效。
+     * 外接摄像头**不**受它影响（`CameraSelection.choose` 里外接无条件优先）。
+     */
+    private val preferredFacing: () -> CameraFacing = { CameraFacing.BACK },
+    /**
+     * 用户有没有关掉拍照。false 时 [takePhotoAndExplain] 直接拒绝，**不开相机**。
+     *
+     * 围栏放在这里而不是放在调用方，是因为拍照有**两个**入口，而它们在用户眼里
+     * 是同一件事：
+     *  - [McpCameraServer] 的模型工具调用（不声明 schema 就调不到，那一层已经拦了）；
+     *  - 监督提醒的定时核验 `runSupervisionVerification`——它**根本不查 `tools/list`**，
+     *    是设备自己到点去拍的。
+     *
+     * 只拦前一条的话，用户关掉相机之后监督流程照样在拍他：界面上写着"已关闭"，
+     * 实际还在拍照。收在这里做单点，将来再多出第三个入口也绕不过去。
+     */
+    private val enabled: () -> Boolean = { true },
 ) {
     @Volatile
     private var visionEndpoint: VisionEndpoint? = null
@@ -86,6 +119,9 @@ class CameraVisionTool(
     }
 
     suspend fun takePhotoAndExplain(question: String): String {
+        // 先查开关再查权限：相机被用户关掉时，"已被用户关闭"才是他想知道的答案，
+        // 报一句权限缺失只会把人引向设置里找一个没坏的东西。
+        check(enabled()) { CAMERA_DISABLED_MESSAGE }
         require(ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
             "Android camera permission is not granted"
         }
@@ -198,7 +234,7 @@ class CameraVisionTool(
         val frameSize = supportedJpegSize(cameraManager, camera.id) ?: CameraSelection.PREFERRED_JPEG_SIZE
         Log.d(
             TAG,
-            "[CAMERA] 选中摄像头 ${camera.id}（${if (camera.isExternal) "外接" else "内建"}，" +
+            "[CAMERA] 选中摄像头 ${camera.id}（${camera.facing.label}，" +
                 "传感器 ${camera.sensorOrientationDegrees}°），上传前转 $rotationDegrees°，" +
                 "输出 ${frameSize.width}x${frameSize.height}",
         )
@@ -450,7 +486,8 @@ class CameraVisionTool(
      * `No external USB camera is available`——那台机器只有一台 `internal/0`、
      * `LENS_FACING_BACK` 的内置摄像头，`/dev/video*` 根本不存在。设了门槛就等于"没有摄像头"。
      *
-     * 挑哪一台交给 [CameraSelection.choose]：有外接仍然优先外接，保住 RK3568 的既有行为。
+     * 挑哪一台交给 [CameraSelection.choose]：有外接仍然优先外接，保住 RK3568 的既有行为；
+     * 没有外接时按用户在设置里选的朝向（前置 / 后置），没得选才用第一台。
      */
     private fun selectCamera(cameraManager: CameraManager): CameraCandidate {
         val candidates = cameraManager.cameraIdList.mapNotNull { id ->
@@ -458,8 +495,7 @@ class CameraVisionTool(
                 val characteristics = cameraManager.getCameraCharacteristics(id)
                 CameraCandidate(
                     id = id,
-                    isExternal = characteristics.get(CameraCharacteristics.LENS_FACING) ==
-                        CameraCharacteristics.LENS_FACING_EXTERNAL,
+                    facing = facingOf(characteristics.get(CameraCharacteristics.LENS_FACING)),
                     sensorOrientationDegrees =
                         characteristics.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 0,
                 )
@@ -467,8 +503,49 @@ class CameraVisionTool(
                 .onFailure { Log.w(TAG, "[CAMERA] 读不到摄像头 $id 的特征：${it.message}") }
                 .getOrNull()
         }
-        return CameraSelection.choose(candidates)
+        return CameraSelection.choose(candidates, preferredFacing())
             ?: throw IOException("本机没有可用的摄像头")
+    }
+
+    /**
+     * 本机有几个**内置**摄像头的朝向可选，给设置页的"用哪一个"那一行用。
+     *
+     * 只报内置（前置 / 后置）：外接在 `CameraSelection.choose` 里是**无条件优先**的，
+     * 把它摆进选择器会造出"你选了后置、实际拍的还是 USB"这种假选项。
+     * 返回不足两项时设置页不显示这一行——只有一台可选的机器上没什么可选的。
+     *
+     * 只读系统列表、不开相机，所以随时可以调。顺序固定为前置在前，不跟系统的枚举顺序走，
+     * 免得同一个选择器在不同机器上左右位置相反。
+     */
+    fun availableBuiltinFacings(): List<CameraFacing> {
+        val cameraManager = context.getSystemService(CameraManager::class.java) ?: return emptyList()
+        return runCatching {
+            cameraManager.cameraIdList
+                .mapNotNull { id ->
+                    runCatching {
+                        facingOf(cameraManager.getCameraCharacteristics(id).get(CameraCharacteristics.LENS_FACING))
+                    }.getOrNull()
+                }
+                .filter { it == CameraFacing.FRONT || it == CameraFacing.BACK }
+                .distinct()
+                .sortedBy { if (it == CameraFacing.FRONT) 0 else 1 }
+        }.getOrElse {
+            Log.w(TAG, "[CAMERA] 读不到摄像头朝向，前/后置选择这一行不显示：${it.message}")
+            emptyList()
+        }
+    }
+
+    /**
+     * `LENS_FACING` 到 [CameraFacing] 的映射。
+     *
+     * 读不到（老 HAL 不报这一项）落到 [CameraFacing.UNKNOWN]，它按后置那套公式转——
+     * 这条映射之前就是"不是外接即内建"的二分，认不出来按后置算和它一致。
+     */
+    private fun facingOf(lensFacing: Int?): CameraFacing = when (lensFacing) {
+        CameraCharacteristics.LENS_FACING_EXTERNAL -> CameraFacing.EXTERNAL
+        CameraCharacteristics.LENS_FACING_FRONT -> CameraFacing.FRONT
+        CameraCharacteristics.LENS_FACING_BACK -> CameraFacing.BACK
+        else -> CameraFacing.UNKNOWN
     }
 
     /** 这台摄像头支持哪些 JPEG 输出尺寸。读不到就返回 null，由调用方退回首选尺寸。 */
