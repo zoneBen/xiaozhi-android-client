@@ -84,8 +84,8 @@ class TaskAlarmRescheduleReceiver : BroadcastReceiver() {
             return task.copy(enabled = false, nextFireAtEpochMs = null)
         }
 
-        // 走 setNextFire 而不是 recordFired：这不是一次触发，不能碰 lastFireAt，
-        // 否则补跑的判定条件（lastFireAt < nextFireAt）会被这次重排搅乱。
+        // 走 setNextFire 而不是 recordFired：重排**不是一次触发**，不能在账本上记下
+        // 一次从没发生过的「上次触发」。补跑判定不读这个字段（理由见 ScheduledTaskDao.setNextFire）。
         runBlocking { repository.setNextFire(task.id, next) }
         return task.copy(nextFireAtEpochMs = next)
     }

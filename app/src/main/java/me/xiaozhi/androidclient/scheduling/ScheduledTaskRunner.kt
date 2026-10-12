@@ -130,12 +130,28 @@ class ScheduledTaskRunner(
             ReminderDeliveryAction.PAUSE_LISTENING_AFTER_GRACE,
             ReminderDeliveryAction.INTERRUPT_CURRENT_TURN_AFTER_GRACE -> yieldForTask(action)
 
-            // 连不上 / 助手正在说 / 已有别的投递在走：这些等下去才有意义，
-            // 等不到就退避重试，直到 TaskRunPolicy 的次数用光。
-            ReminderDeliveryAction.WAIT_FOR_CONNECTION,
-            ReminderDeliveryAction.WAIT_FOR_ACTIVE_DELIVERY,
+            // 还没连上：**没人在被打断**，而且这一档最常见的情形正是「闹钟把 App 从
+            // 后台/被杀状态拽回来，进程刚起、正在连服务端」。所以它单独拿一份宽得多的
+            // 预算——理由与实测数据见 TaskRunPolicy 的类注释。
+            ReminderDeliveryAction.WAIT_FOR_CONNECTION -> {
+                retryOrGiveUp(
+                    execution = execution,
+                    task = task,
+                    reason = "还没连上服务端",
+                    maxAttempts = TaskRunPolicy.CONNECT_WAIT_MAX_ATTEMPTS,
+                )
+                return
+            }
+
+            // 下面两种是「用户正在用」：等一会儿就有戏，但等久了会唐突——用户说完话的
+            // 下一秒突然冒出一句他没要的话，比这次没做成更糟。沿用那份 46 秒的预算。
             ReminderDeliveryAction.WAIT_FOR_ASSISTANT -> {
-                retryOrGiveUp(execution, task, "设备还没准备好接收消息")
+                retryOrGiveUp(execution, task, "助手正在说话")
+                return
+            }
+
+            ReminderDeliveryAction.WAIT_FOR_ACTIVE_DELIVERY -> {
+                retryOrGiveUp(execution, task, "还有一条消息正在投递")
                 return
             }
         }
@@ -179,13 +195,20 @@ class ScheduledTaskRunner(
 
     // ---------- 收尾 ----------
 
+    /**
+     * 退避重试，或者认输。
+     *
+     * [maxAttempts] 由调用方按**失败原因**选（见 [TaskRunPolicy]）：撞上用户在用只给 46 秒，
+     * 还没连上则给到 4 分钟上下。默认取窄的那档——调用方没想清楚时不该白等四分钟。
+     */
     private suspend fun retryOrGiveUp(
         execution: TaskExecutionEntity,
         task: ScheduledTaskEntity,
         reason: String,
+        maxAttempts: Int = TaskRunPolicy.MAX_ATTEMPTS,
     ) {
         val attempts = execution.attempts + 1
-        if (TaskRunPolicy.hasAttemptsLeft(attempts)) {
+        if (TaskRunPolicy.hasAttemptsLeft(attempts, maxAttempts)) {
             val delayMs = TaskRunPolicy.retryDelayMs(attempts)
             repository.requeue(
                 executionId = execution.id,
@@ -202,7 +225,7 @@ class ScheduledTaskRunner(
         finish(
             execution,
             TaskOutcome.SKIPPED_BUSY,
-            "$reason，试了 ${TaskRunPolicy.MAX_ATTEMPTS} 次都没成功",
+            "$reason，试了 $maxAttempts 次都没成功",
         )
         note("定时任务「${task.title}」没能执行：$reason")
     }
