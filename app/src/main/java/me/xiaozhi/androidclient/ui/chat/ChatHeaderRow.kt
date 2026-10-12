@@ -32,9 +32,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import me.xiaozhi.androidclient.model.UiState
-
-/** = MainActivity 的 `HeaderTint`（见那边的别名，两处是同一个值）。 */
-internal val ChatHeaderTint = Color(0xFFE8F0FC)
+import me.xiaozhi.androidclient.ui.theme.ChatHeaderTint
 
 /**
  * 聊天页顶栏：**单行**。

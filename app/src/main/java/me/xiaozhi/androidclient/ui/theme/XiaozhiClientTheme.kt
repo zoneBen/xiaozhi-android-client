@@ -17,15 +17,9 @@ import androidx.compose.ui.unit.sp
 
 // 配色从原来的「鸢尾紫 + 兰花紫」换成一套冷静的品牌蓝。
 // 原方案在真机上偏灰紫、控件和背景互相抢，看着像未完成的默认主题。
-private val Brand = Color(0xFF3E7BFA)
-private val BrandSoft = Color(0xFFDCE8FF)
-private val BrandDeep = Color(0xFF1E4FB8)
-private val Teal = Color(0xFF3FA2B8)
-private val Mint = Color(0xFF3F8F7A)
-private val Paper = Color(0xFFF1F5FA)
-private val Stone = Color(0xFFE3EAF3)
-private val Ink = Color(0xFF16202E)
-private val Night = Color(0xFF10161F)
+//
+// 色值本身住在 ui/theme/Palette.kt —— 设置页和聊天页顶栏也要用同一批，
+// 定义在这里 private 就只有本文件看得见了。
 
 private val LightColors = lightColorScheme(
     primary = Brand,

@@ -144,12 +144,14 @@ import me.xiaozhi.androidclient.ui.MainViewModel
 import me.xiaozhi.androidclient.ui.settings.AboutCard
 import me.xiaozhi.androidclient.ui.chat.AssistantAvatar
 import me.xiaozhi.androidclient.ui.chat.ChatHeaderRow
-import me.xiaozhi.androidclient.ui.chat.ChatHeaderTint
-import me.xiaozhi.androidclient.ui.chat.StatusActiveGreen
-import me.xiaozhi.androidclient.ui.chat.StatusBrandBlue
-import me.xiaozhi.androidclient.ui.chat.StatusInterruptRed
-import me.xiaozhi.androidclient.ui.chat.StatusLamp
 import me.xiaozhi.androidclient.ui.chat.chatStatusOf
+import me.xiaozhi.androidclient.ui.chat.StatusLamp
+import me.xiaozhi.androidclient.ui.theme.Brand
+import me.xiaozhi.androidclient.ui.theme.BrandSoft
+import me.xiaozhi.androidclient.ui.theme.ChatHeaderTint
+import me.xiaozhi.androidclient.ui.theme.DangerRed
+import me.xiaozhi.androidclient.ui.theme.Paper
+import me.xiaozhi.androidclient.ui.theme.ReadyGreen
 import me.xiaozhi.androidclient.ui.theme.XiaozhiClientTheme
 
 private enum class AppScreen { CHAT, SETTINGS }
@@ -160,23 +162,22 @@ private sealed interface PendingAudioAction {
 
 // 配色：原方案是「淡紫底 + 亮绿气泡」，饱和度互相打架，看着像开发默认主题。
 // 换成一套冷调、低饱和、层级清楚的方案——底浅、卡片白、用户气泡用一个明确的品牌蓝。
-private val ChatBackground = Color(0xFFF1F5FA)
-private val SettingsBackground = Color(0xFFF1F5FA)
-private val UserBubble = Color(0xFF3E7BFA)
+//
+// 十六进制值本身住在 ui/theme/Palette.kt（设置页与顶栏也要用同一批），
+// 这里只保留本文件里的**语义名字**，免得读代码的人还要去猜「3E7BFA 是哪个蓝」。
+private val ChatBackground = Paper
+private val SettingsBackground = Paper
+private val UserBubble = Brand
 private val AssistantBubble = Color.White
-private val BrandAccentSoft = Color(0xFFDCE8FF)
-
-// 下面三个色现在住在 ui/chat 那侧（顶栏和状态灯先用到了它们），这里只留别名。
-// 再写一遍十六进制就会有两份"品牌蓝"，而它们慢慢走偏之后没人看得出来，
-// 只会觉得界面某处不对劲。
 private val HeaderTint = ChatHeaderTint
-private val BrandAccent = StatusBrandBlue
+private val BrandAccent = Brand
+private val BrandAccentSoft = BrandSoft
 
 /**
  * 「打断」按钮的红。比 Material 默认的 error 色更饱和、更亮，
  * 因为它是数字人画面上唯一一个需要在「正在播报」的瞬间被一眼找到的控件。
  */
-private val InterruptRed = StatusInterruptRed
+private val InterruptRed = DangerRed
 
 /**
  * 本机没有对应硬件时，设置页那一行降到的透明度。
@@ -885,7 +886,7 @@ private fun StartupLoadingOverlay(state: UiState, onContinueAnyway: (() -> Unit)
                 Text(
                     text = "麦克风：已就绪 ✓",
                     style = MaterialTheme.typography.bodyMedium,
-                    color = StatusActiveGreen,
+                    color = ReadyGreen,
                 )
             } else {
                 Surface(

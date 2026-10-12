@@ -3,6 +3,11 @@ package me.xiaozhi.androidclient.ui.chat
 import androidx.compose.ui.graphics.Color
 import me.xiaozhi.androidclient.model.ConnectionStatus
 import me.xiaozhi.androidclient.model.UiState
+import me.xiaozhi.androidclient.ui.theme.Brand
+import me.xiaozhi.androidclient.ui.theme.DangerRed
+import me.xiaozhi.androidclient.ui.theme.MutedGray
+import me.xiaozhi.androidclient.ui.theme.PendingAmber
+import me.xiaozhi.androidclient.ui.theme.ReadyGreen
 
 /**
  * 顶栏状态灯上那**一个**状态。
@@ -76,31 +81,13 @@ fun chatStatusLabel(status: ChatStatus): String = when (status) {
  * 一台常年开着的设备上，谁都需要一眼扫过去，色彩一旦到处都是就等于没有色彩。
  */
 fun chatStatusColor(status: ChatStatus): Color = when (status) {
-    ChatStatus.SPEAKING -> StatusSpeakingAmber
-    ChatStatus.LISTENING -> StatusBrandBlue
-    ChatStatus.ACTIVE -> StatusActiveGreen
-    ChatStatus.FAILED -> StatusInterruptRed
+    ChatStatus.SPEAKING -> PendingAmber
+    ChatStatus.LISTENING -> Brand
+    ChatStatus.ACTIVE -> ReadyGreen
+    ChatStatus.FAILED -> DangerRed
     ChatStatus.ACTIVATING,
     ChatStatus.FETCHING_CONFIG,
     ChatStatus.CONNECTING,
     ChatStatus.DISCONNECTED,
-    -> StatusNeutralGray
+    -> MutedGray
 }
-
-/*
- * 下面三个色**和 MainActivity 色板里的是同一个值**，所以那边直接引用这里，
- * 而不是各写一份十六进制：两份一定会走偏，而"品牌蓝在两个地方不一样"这种事
- * 谁也不会注意到，只会觉得界面看着哪里不对劲。
- */
-
-/** = MainActivity 的 `BrandAccent`。深色底上作状态文字也够亮。 */
-internal val StatusBrandBlue = Color(0xFF3E7BFA)
-
-/** = MainActivity 的 `InterruptRed`。 */
-internal val StatusInterruptRed = Color(0xFFE53935)
-
-/** = 启动自检里「麦克风已就绪 ✓」那行的绿。 */
-internal val StatusActiveGreen = Color(0xFF16A34A)
-
-private val StatusSpeakingAmber = Color(0xFFF59E0B)
-private val StatusNeutralGray = Color(0xFF9CA3AF)
