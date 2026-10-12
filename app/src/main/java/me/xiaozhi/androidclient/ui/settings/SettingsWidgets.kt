@@ -4,8 +4,11 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
@@ -15,20 +18,32 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import me.xiaozhi.androidclient.R
@@ -140,6 +155,13 @@ internal fun SettingsStatus(
     icon: String,
     title: String,
     subtitle: String,
+    /**
+     * 副标题的颜色。默认是次要文字色；**失败结果传 [DangerRed]**。
+     *
+     * 用 `Color?` 而不是让默认值直接引用 `MaterialTheme`：默认参数在调用点求值，
+     * 传 null 时再取主题色，语义更直白，也不会把一个 Composable 调用藏进签名里。
+     */
+    subtitleColor: Color? = null,
 ) {
     Row(
         modifier = Modifier
@@ -157,8 +179,67 @@ internal fun SettingsStatus(
             Text(
                 text = subtitle,
                 style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                color = subtitleColor ?: MaterialTheme.colorScheme.onSurfaceVariant,
             )
+        }
+    }
+}
+
+/**
+ * 一个带标题的输入框（邮件设置那一屏要用七个）。
+ *
+ * 标题放在框**外面**而不是用 `OutlinedTextField` 自带的 `label`：label 在焦点态会浮到
+ * 边框上，一屏七个框同时有一两个浮着，读起来比"标题始终在框上方"乱得多。
+ * 副标题（[helper]）用于写"这个字段填什么才不算白填"这类只在框外说得清的话。
+ */
+@Composable
+internal fun SettingsTextField(
+    icon: String,
+    title: String,
+    value: String,
+    onValueChange: (String) -> Unit,
+    placeholder: String = "",
+    helper: String = "",
+    /** 密码/授权码：显示成圆点。**只是显示**——它照样明文存在本机（见 MailSettingsStore）。 */
+    isPassword: Boolean = false,
+    keyboardType: KeyboardType = KeyboardType.Text,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 14.dp),
+        horizontalArrangement = Arrangement.spacedBy(14.dp),
+        verticalAlignment = Alignment.Top,
+    ) {
+        Text(text = icon)
+        Column(
+            modifier = Modifier.weight(1f),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            Text(text = title, fontWeight = FontWeight.SemiBold)
+            OutlinedTextField(
+                value = value,
+                onValueChange = onValueChange,
+                modifier = Modifier.fillMaxWidth(),
+                placeholder = if (placeholder.isBlank()) null else {
+                    { Text(placeholder, style = MaterialTheme.typography.bodySmall) }
+                },
+                visualTransformation = if (isPassword) {
+                    PasswordVisualTransformation()
+                } else {
+                    VisualTransformation.None
+                },
+                keyboardOptions = KeyboardOptions(keyboardType = keyboardType),
+                singleLine = true,
+                textStyle = MaterialTheme.typography.bodyMedium,
+            )
+            if (helper.isNotBlank()) {
+                Text(
+                    text = helper,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
         }
     }
 }
@@ -263,7 +344,12 @@ internal fun SettingsSwitch(
  *
  * 只在**真的有得选**的时候才显示（调用方在选项少于两个时直接不渲染这一行）——
  * 一个只有一个选项的选择器是在浪费用户的时间。
+ *
+ * 几个胶囊用 [FlowRow] 排、**不是普通 `Row`**：普通 Row 会把剩下的宽度发给最后一个
+ * 孩子，宽度不够时那个胶囊的文字就自己折行——真机上「Gmail」被挤成了竖排的
+ * 「G / m / ail」，「不加密」也折成两行。FlowRow 是整颗胶囊换行，读起来才正常。
  */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 internal fun SettingsChoice(
     icon: String,
@@ -285,7 +371,10 @@ internal fun SettingsChoice(
             verticalArrangement = Arrangement.spacedBy(6.dp),
         ) {
             Text(text = title, fontWeight = FontWeight.SemiBold)
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
                 options.forEachIndexed { index, (label, selected) ->
                     ChoiceChip(label = label, selected = selected) { onSelect(index) }
                 }
@@ -314,6 +403,85 @@ private fun ChoiceChip(label: String, selected: Boolean, onClick: () -> Unit) {
             color = if (selected) Brand else MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
         )
+    }
+}
+
+/**
+ * 一行下拉选择。选中的那一项显示在右边，点整行弹出菜单。
+ *
+ * 和 [SettingsChoice] 的分工：胶囊适合"两三个选项、每个都该一眼看见"；
+ * 选项多起来之后一排胶囊会挤着换行（真机上四个就把这一行撑成两排），
+ * 而这类选择的选项还会随着适配的增长继续加。下拉把"当前值"和"全部选项"
+ * 分开——平时只占一行，要看别的才展开。
+ *
+ * 下拉箭头用 [R.drawable.ic_chevron_right] 旋转 90° 得到，**不引入 down 图标的资源**：
+ * 两个形状完全一样，多一个文件只会让"箭头到底有几个"变成需要查的事。
+ */
+@Composable
+internal fun SettingsDropdown(
+    icon: String,
+    title: String,
+    subtitle: String,
+    options: List<String>,
+    selectedIndex: Int,
+    onSelect: (Int) -> Unit,
+) {
+    var expanded by remember { mutableStateOf(false) }
+
+    Box {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable { expanded = true }
+                .padding(horizontal = 16.dp, vertical = 16.dp),
+            horizontalArrangement = Arrangement.spacedBy(14.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(text = icon)
+            Column(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                Text(text = title, fontWeight = FontWeight.SemiBold)
+                if (subtitle.isNotBlank()) {
+                    Text(
+                        text = subtitle,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+            Text(
+                text = options.getOrNull(selectedIndex).orEmpty(),
+                style = MaterialTheme.typography.labelLarge,
+                color = Brand,
+                fontWeight = FontWeight.Bold,
+            )
+            Icon(
+                painter = painterResource(R.drawable.ic_chevron_right),
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.rotate(90f),
+            )
+        }
+        DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+            options.forEachIndexed { index, label ->
+                val selected = index == selectedIndex
+                DropdownMenuItem(
+                    text = {
+                        Text(
+                            text = label,
+                            fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
+                            color = if (selected) Brand else MaterialTheme.colorScheme.onSurface,
+                        )
+                    },
+                    onClick = {
+                        expanded = false
+                        onSelect(index)
+                    },
+                )
+            }
+        }
     }
 }
 

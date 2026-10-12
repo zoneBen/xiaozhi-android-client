@@ -10,6 +10,11 @@
 # 这些 handler 只在 META-INF/mailcap 里被按名字引用，R8 看不出有人用它们。
 -keep class com.sun.mail.handlers.** { *; }
 
+# 自签证书用的 SSL 工厂：JavaMail 拿 `mail.smtp.ssl.socketFactory.class` 里的**类名**
+# 去 Class.forName + newInstance。类名一旦被混淆，只有开了混淆的 release 包会发现，
+# 症状是"打开了信任自签证书反而连不上"。
+-keep class me.xiaozhi.androidclient.email.TrustingSslSocketFactory { public <init>(); }
+
 -dontwarn javax.mail.**
 -dontwarn com.sun.mail.**
 -dontwarn com.sun.activation.**

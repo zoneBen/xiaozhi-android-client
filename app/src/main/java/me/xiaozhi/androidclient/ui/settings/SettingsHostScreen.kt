@@ -3,6 +3,9 @@ package me.xiaozhi.androidclient.ui.settings
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.lifecycle.viewmodel.compose.viewModel
 import me.xiaozhi.androidclient.camera.CameraFacing
 import me.xiaozhi.androidclient.digitalhuman.UploadTarget
 import me.xiaozhi.androidclient.model.DigitalHumanSlot
@@ -44,9 +47,17 @@ internal fun SettingsHostScreen(
     onClearActiveRoleHistory: () -> Unit,
     onClearAllHistory: () -> Unit,
 ) {
+    // 邮件设置页的 ViewModel **归这里持有**，不下发给 MainActivity：
+    // 它只服务设置首页那一行摘要和邮件页自己，跟 `MainViewModel` 的对话/连接状态毫无关系。
+    // 放在这一层而不是邮件页内部，是为了让首页那行摘要和邮件页读到**同一份**配置——
+    // 各自 `viewModel()` 出来的会是同一个实例，但让摘要去读另一个 VM 的私有状态更绕。
+    val emailViewModel: EmailSettingsViewModel = viewModel()
+    val emailState by emailViewModel.state.collectAsState()
+
     when (page) {
         SettingsPage.HOME -> SettingsHomeScreen(
             state = state,
+            emailSummary = emailSettingsSummary(emailState.config),
             padding = padding,
             onNavigate = onNavigate,
         )
@@ -89,6 +100,15 @@ internal fun SettingsHostScreen(
             onClearActiveRole = onClearActiveRoleHistory,
             onClearAll = onClearAllHistory,
         )
+
+        SettingsPage.EMAIL -> EmailSettingsScreen(
+            state = emailState,
+            padding = padding,
+            onConfigChange = emailViewModel::updateConfig,
+            onPortChange = emailViewModel::updatePort,
+            onSave = { emailViewModel.save() },
+            onSendTest = emailViewModel::sendTest,
+        )
     }
 }
 
@@ -101,6 +121,7 @@ internal fun SettingsHostScreen(
 @Composable
 private fun SettingsHomeScreen(
     state: UiState,
+    emailSummary: String,
     padding: PaddingValues,
     onNavigate: (SettingsPage) -> Unit,
 ) {
@@ -125,6 +146,13 @@ private fun SettingsHomeScreen(
                 title = SettingsPage.CONVERSATION.title,
                 summary = conversationSettingsSummary(state),
                 onClick = { onNavigate(SettingsPage.CONVERSATION) },
+            )
+            HorizontalDivider()
+            SettingsNavRow(
+                icon = "📮",
+                title = SettingsPage.EMAIL.title,
+                summary = emailSummary,
+                onClick = { onNavigate(SettingsPage.EMAIL) },
             )
             HorizontalDivider()
             SettingsNavRow(

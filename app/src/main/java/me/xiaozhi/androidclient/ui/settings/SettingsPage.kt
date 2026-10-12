@@ -14,5 +14,6 @@ enum class SettingsPage(val title: String) {
     ROLE("角色设置"),
     DEVICE("设备控制"),
     CONVERSATION("对话与历史"),
+    EMAIL("邮件设置"),
     ABOUT("关于与更新"),
 }

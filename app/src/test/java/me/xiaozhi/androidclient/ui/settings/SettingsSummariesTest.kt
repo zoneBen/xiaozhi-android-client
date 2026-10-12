@@ -1,5 +1,7 @@
 package me.xiaozhi.androidclient.ui.settings
 
+import me.xiaozhi.androidclient.email.EmailConfig
+import me.xiaozhi.androidclient.email.EmailSecurity
 import me.xiaozhi.androidclient.model.RoleProfile
 import me.xiaozhi.androidclient.model.UiState
 import org.junit.Assert.assertEquals
@@ -7,7 +9,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * 设置首页三行摘要的分支覆盖。
+ * 设置首页每一行摘要的分支覆盖。
  *
  * 这几句话是用户判断「要不要点进去」的唯一依据，念错了比不念更糟——
  * 他不会再进去核对。
@@ -107,4 +109,42 @@ class SettingsSummariesTest {
         val state = UiState(historyTotalCount = 7, historyActiveRoleCount = 0)
         assertEquals("共 7 条 · 当前角色 0 条", conversationSettingsSummary(state))
     }
+
+    @Test
+    fun `关着邮件功能时说未启用，不提配置填没填`() {
+        // 关着的时候"服务器填了没"是个无意义的问题——能力压根不存在。
+        val off = EmailConfig(enabled = false, host = "", username = "")
+        assertEquals("未启用", emailSettingsSummary(off))
+    }
+
+    @Test
+    fun `开着但没填完时要明说没填完，不能只说已启用`() {
+        // 这是最该被看见的一种：用户以为配好了，实际一发就报错。
+        val halfDone = EmailConfig(enabled = true, host = "smtp.qq.com")
+        assertEquals("已打开，但服务器/账号还没填完", emailSettingsSummary(halfDone))
+    }
+
+    @Test
+    fun `填完了就报出默认发给谁`() {
+        val summary = emailSettingsSummary(configured())
+        assertEquals("已启用 · 默认发给 someone@qq.com", summary)
+    }
+
+    @Test
+    fun `不加密要单独点一句`() {
+        // 能用，但不该用——这种情况必须和正常配置读起来不一样。
+        val summary = emailSettingsSummary(configured().copy(security = EmailSecurity.NONE, port = 25))
+        assertTrue("期望点出不加密，实际「$summary」", summary.contains("未加密"))
+        assertTrue("期望仍然报收件人，实际「$summary」", summary.contains("someone@qq.com"))
+    }
+
+    private fun configured() = EmailConfig(
+        enabled = true,
+        host = "smtp.qq.com",
+        port = 465,
+        security = EmailSecurity.SSL,
+        username = "someone@qq.com",
+        password = "authcode",
+        defaultRecipient = "someone@qq.com",
+    )
 }

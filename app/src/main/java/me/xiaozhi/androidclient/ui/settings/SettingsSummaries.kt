@@ -1,5 +1,8 @@
 package me.xiaozhi.androidclient.ui.settings
 
+import me.xiaozhi.androidclient.email.EmailConfig
+import me.xiaozhi.androidclient.email.EmailConfigValidator
+import me.xiaozhi.androidclient.email.EmailSecurity
 import me.xiaozhi.androidclient.model.UiState
 
 /**
@@ -57,4 +60,26 @@ internal fun conversationSettingsSummary(state: UiState): String {
     val total = state.historyTotalCount
     if (total <= 0) return "还没有对话记录"
     return "共 $total 条 · 当前角色 ${state.historyActiveRoleCount} 条"
+}
+
+/**
+ * 「邮件设置」这一行。
+ *
+ * 三种状态对应三件不同的事，不能合并成"关/开"两态：
+ * - 关着：这个能力根本不存在（助手不会被告知会发邮件）；
+ * - 开着但没填完：**最该被看见的一种**——用户以为配好了，实际一发就报错，
+ *   所以摘要里要明说"还没填完"，把他推回这一页；
+ * - 开着且填完：报出发给谁，这是这个能力最常被问到的一件事。
+ *
+ * 不加密单独点一句：它是唯一一种"能用但不该用"的配置。
+ */
+internal fun emailSettingsSummary(config: EmailConfig): String {
+    if (!config.enabled) return "未启用"
+    if (EmailConfigValidator.validate(config) != null) return "已打开，但服务器/账号还没填完"
+    val recipient = config.defaultRecipient.trim()
+    return if (config.security == EmailSecurity.NONE) {
+        "已启用（未加密）· 默认发给 $recipient"
+    } else {
+        "已启用 · 默认发给 $recipient"
+    }
 }
