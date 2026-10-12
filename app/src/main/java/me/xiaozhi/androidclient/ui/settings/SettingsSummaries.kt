@@ -1,9 +1,12 @@
 package me.xiaozhi.androidclient.ui.settings
 
+import me.xiaozhi.androidclient.data.db.ScheduledTaskEntity
 import me.xiaozhi.androidclient.email.EmailConfig
 import me.xiaozhi.androidclient.email.EmailConfigValidator
 import me.xiaozhi.androidclient.email.EmailSecurity
 import me.xiaozhi.androidclient.model.UiState
+import me.xiaozhi.androidclient.scheduling.nextFireSummary
+import java.time.ZoneId
 
 /**
  * 设置首页每一行右边那句状态摘要。
@@ -82,4 +85,26 @@ internal fun emailSettingsSummary(config: EmailConfig): String {
     } else {
         "已启用 · 默认发给 $recipient"
     }
+}
+
+/**
+ * 「定时任务」这一行。
+ *
+ * 报**最近一次什么时候响**，而不是"共几条"。用户点进来绝大多数时候是想确认
+ * "我设的那个东西还在不在、还响不响"，条数只在"到底建了几条"时才有人关心。
+ *
+ * 「全都停用了」单独说一句：那种状态下什么都不会发生，而用户最可能的困惑正是
+ * "我明明设了"——摘要里点破它，就不用他进去一条条看开关。
+ */
+internal fun scheduledTasksSummary(
+    tasks: List<ScheduledTaskEntity>,
+    nowEpochMs: Long,
+    zone: ZoneId,
+): String {
+    if (tasks.isEmpty()) return "还没有定时任务"
+    val enabled = tasks.filter { it.enabled }
+    if (enabled.isEmpty()) return "共 ${tasks.size} 条 · 全都停用了"
+    val soonest = enabled.mapNotNull { it.nextFireAtEpochMs }.minOrNull()
+        ?: return "共 ${tasks.size} 条 · ${enabled.size} 条开着，但都没有下一次"
+    return "共 ${tasks.size} 条 · 最近一次：${nextFireSummary(soonest, nowEpochMs, zone)}"
 }

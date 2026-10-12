@@ -1,5 +1,6 @@
 package me.xiaozhi.androidclient.scheduling
 
+import me.xiaozhi.androidclient.data.db.ScheduledTaskEntity
 import me.xiaozhi.androidclient.data.db.TaskExecutionEntity
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -143,10 +144,88 @@ class ScheduledTaskSummaryTest {
         assertEquals("状态不明", executionSummary(execution(status = "WHATEVER")))
     }
 
+    // ---------- 任务列表的一行 ----------
+
+    @Test
+    fun `一行里是做什么、什么时候、下一次`() {
+        val now = atLocal(2026, 3, 1, 8, 0)
+        val next = atLocal(2026, 3, 1, 8, 30)
+
+        // 「做什么」必须在最前面：光看「每天 08:30」看不出这条任务到点会说话还是拍照。
+        assertEquals(
+            "给助手说句话 · 每天 08:30 · 下次：30 分钟后",
+            taskRowSummary(task(nextFireAt = next), now, SHANGHAI),
+        )
+        assertEquals(
+            "拍张照片发邮箱 · 每天 08:30 · 下次：30 分钟后",
+            taskRowSummary(task(action = TaskAction.PHOTO_TO_EMAIL.name, nextFireAt = next), now, SHANGHAI),
+        )
+    }
+
+    @Test
+    fun `停用的任务不说下一次`() {
+        // 停用的行里 nextFireAt 是停用前留下的旧值，照念出来等于在暗示它还会响。
+        assertEquals(
+            "给助手说句话 · 每天 08:30 · 已停用",
+            taskRowSummary(task(enabled = false, nextFireAt = atLocal(2026, 3, 1, 8, 0)), atLocal(2026, 3, 1, 8, 0), SHANGHAI),
+        )
+    }
+
+    @Test
+    fun `没有下一次时只念一句，不念成下次没有下一次`() {
+        assertEquals(
+            "给助手说句话 · 每天 08:30 · 没有下一次",
+            taskRowSummary(task(nextFireAt = null), atLocal(2026, 3, 1, 8, 0), SHANGHAI),
+        )
+    }
+
+    @Test
+    fun `动作或周期认不出来时也不崩`() {
+        val now = atLocal(2026, 3, 1, 8, 0)
+        val next = atLocal(2026, 3, 1, 8, 30)
+
+        assertEquals(
+            "不认识的动作 · 每天 08:30 · 下次：30 分钟后",
+            taskRowSummary(task(action = "SOMETHING_NEW", nextFireAt = next), now, SHANGHAI),
+        )
+        assertEquals(
+            "给助手说句话 · 周期认不出来 · 下次：30 分钟后",
+            taskRowSummary(task(kind = "SOMETHING_NEW", nextFireAt = next), now, SHANGHAI),
+        )
+    }
+
     // ---------- 助手 ----------
 
     private fun atLocal(y: Int, m: Int, d: Int, h: Int, min: Int): Long =
         LocalDate.of(y, m, d).atTime(h, min).atZone(SHANGHAI).toInstant().toEpochMilli()
+
+    private fun task(
+        kind: String = TaskKind.DAILY.name,
+        action: String = TaskAction.INJECT_TEXT.name,
+        enabled: Boolean = true,
+        nextFireAt: Long? = null,
+    ) = ScheduledTaskEntity(
+        id = 1L,
+        title = "测试任务",
+        kind = kind,
+        intervalMinutes = null,
+        hourOfDay = 8,
+        minuteOfHour = 30,
+        daysOfWeekMask = null,
+        daysOfMonthCsv = null,
+        fireAtEpochMs = null,
+        anchorEpochMs = 0L,
+        action = action,
+        text = "该吃药了",
+        emailTo = null,
+        emailSubject = null,
+        allowCatchUp = true,
+        enabled = enabled,
+        lastFireAtEpochMs = null,
+        nextFireAtEpochMs = nextFireAt,
+        createdAtEpochMs = 0L,
+        updatedAtEpochMs = 0L,
+    )
 
     private fun interval(minutes: Int) =
         RecurrenceSpec(TaskKind.INTERVAL, intervalMinutes = minutes, anchorEpochMs = 0)

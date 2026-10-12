@@ -1,5 +1,6 @@
 package me.xiaozhi.androidclient.scheduling
 
+import me.xiaozhi.androidclient.data.db.ScheduledTaskEntity
 import me.xiaozhi.androidclient.data.db.TaskExecutionEntity
 import java.time.DayOfWeek
 import java.time.Instant
@@ -105,6 +106,28 @@ fun executionSummary(execution: TaskExecutionEntity): String {
     }
     val detail = execution.detail.orEmpty().trim()
     return if (detail.isEmpty()) head else "$head（$detail）"
+}
+
+/**
+ * 任务列表里的一行说明，三段拼起来：**做什么 · 什么时候 · 下一次**。
+ *
+ * 顺序不是随手定的。「做什么」决定了用户要不要往下读（发邮件和说句话是完全两件事，
+ * 而周期描述里看不出来）；"下一次"放最后是因为它一直在变、最常被扫，挪到前面会让
+ * 每一行的开头都在跳。
+ *
+ * 停用的任务**不显示"没有下一次"**——那条任务压根不会响，写"下一次"是在暗示它还会响。
+ */
+fun taskRowSummary(task: ScheduledTaskEntity, nowEpochMs: Long, zone: ZoneId): String {
+    val action = TaskAction.fromName(task.action)?.label ?: "不认识的动作"
+    val cycle = task.recurrenceSpec()?.let { recurrenceSummary(it, zone) } ?: "周期认不出来"
+    // nextFireSummary 自己在没有下一次时也返回"没有下一次"，直接拼会变成"下次：没有下一次"。
+    val next = task.nextFireAtEpochMs
+    val tail = when {
+        !task.enabled -> "已停用"
+        next == null -> "没有下一次"
+        else -> "下次：${nextFireSummary(next, nowEpochMs, zone)}"
+    }
+    return "$action · $cycle · $tail"
 }
 
 /** 「一」「二」……单字，用来拼「每周一三五」。 */

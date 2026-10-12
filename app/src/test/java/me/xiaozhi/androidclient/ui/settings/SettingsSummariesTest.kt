@@ -1,5 +1,6 @@
 package me.xiaozhi.androidclient.ui.settings
 
+import me.xiaozhi.androidclient.data.db.ScheduledTaskEntity
 import me.xiaozhi.androidclient.email.EmailConfig
 import me.xiaozhi.androidclient.email.EmailSecurity
 import me.xiaozhi.androidclient.model.RoleProfile
@@ -7,6 +8,8 @@ import me.xiaozhi.androidclient.model.UiState
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.time.LocalDateTime
+import java.time.ZoneId
 
 /**
  * 设置首页每一行摘要的分支覆盖。
@@ -147,4 +150,68 @@ class SettingsSummariesTest {
         password = "authcode",
         defaultRecipient = "someone@qq.com",
     )
+
+    // ---------- 定时任务 ----------
+
+    @Test
+    fun `一条任务都没有时说不出来是空的`() {
+        assertEquals("还没有定时任务", scheduledTasksSummary(emptyList(), NOW, SHANGHAI))
+    }
+
+    @Test
+    fun `全都停用时要点破，因为那时什么都不会发生`() {
+        // 用户最可能的困惑正是"我明明设了" —— 摘要里说清，就不用他进去一条条看开关。
+        val tasks = listOf(task(enabled = false, nextFireAt = NOW + 60_000), task(enabled = false))
+
+        assertEquals("共 2 条 · 全都停用了", scheduledTasksSummary(tasks, NOW, SHANGHAI))
+    }
+
+    @Test
+    fun `报最近一次什么时候响，而不是报条数`() {
+        val tasks = listOf(
+            task(nextFireAt = NOW + 30 * 60_000L),
+            task(nextFireAt = NOW + 5 * 60_000L),
+            task(enabled = false, nextFireAt = NOW + 60_000L),
+        )
+
+        assertEquals("共 3 条 · 最近一次：5 分钟后", scheduledTasksSummary(tasks, NOW, SHANGHAI))
+    }
+
+    @Test
+    fun `开着但都没有下一次时要说出来`() {
+        val tasks = listOf(task(nextFireAt = null))
+
+        assertEquals("共 1 条 · 1 条开着，但都没有下一次", scheduledTasksSummary(tasks, NOW, SHANGHAI))
+    }
+
+    private fun task(enabled: Boolean = true, nextFireAt: Long? = null) = ScheduledTaskEntity(
+        id = 1L,
+        title = "测试任务",
+        kind = "DAILY",
+        intervalMinutes = null,
+        hourOfDay = 8,
+        minuteOfHour = 30,
+        daysOfWeekMask = null,
+        daysOfMonthCsv = null,
+        fireAtEpochMs = null,
+        anchorEpochMs = 0L,
+        action = "INJECT_TEXT",
+        text = "该吃药了",
+        emailTo = null,
+        emailSubject = null,
+        allowCatchUp = true,
+        enabled = enabled,
+        lastFireAtEpochMs = null,
+        nextFireAtEpochMs = nextFireAt,
+        createdAtEpochMs = 0L,
+        updatedAtEpochMs = 0L,
+    )
+
+    private companion object {
+        val SHANGHAI: ZoneId = ZoneId.of("Asia/Shanghai")
+
+        /** 2026-03-01 08:00。全部用例共用这一个"现在"，相对时间的结论才好对照。 */
+        val NOW: Long = LocalDateTime.of(2026, 3, 1, 8, 0)
+            .atZone(SHANGHAI).toInstant().toEpochMilli()
+    }
 }

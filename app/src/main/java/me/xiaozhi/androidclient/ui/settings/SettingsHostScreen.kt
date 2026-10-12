@@ -10,6 +10,7 @@ import me.xiaozhi.androidclient.camera.CameraFacing
 import me.xiaozhi.androidclient.digitalhuman.UploadTarget
 import me.xiaozhi.androidclient.model.DigitalHumanSlot
 import me.xiaozhi.androidclient.model.UiState
+import java.time.ZoneId
 
 /**
  * 设置的总入口：按 [page] 决定渲染哪一屏。
@@ -54,10 +55,23 @@ internal fun SettingsHostScreen(
     val emailViewModel: EmailSettingsViewModel = viewModel()
     val emailState by emailViewModel.state.collectAsState()
 
+    // 定时任务页同理。它比邮件多一层理由：任务列表是**从库里流出来的**，
+    // 首页那行摘要若自己再开一个 VM，就会和任务页各订阅一条独立的 Flow，
+    // 两边在同一时刻看到的列表不保证一样（而摘要写的正是"最近一次什么时候响"）。
+    val tasksViewModel: ScheduledTasksViewModel = viewModel()
+    val tasksState by tasksViewModel.state.collectAsState()
+
     when (page) {
         SettingsPage.HOME -> SettingsHomeScreen(
             state = state,
             emailSummary = emailSettingsSummary(emailState.config),
+            // 「最近一次：3 分钟后」这种相对时间只在**每次重组**时重算，不自己走时钟。
+            // 首页是个过路页，为一句话在整棵设置树上挂一个 30 秒的重组不划算。
+            tasksSummary = scheduledTasksSummary(
+                tasks = tasksState.tasks,
+                nowEpochMs = System.currentTimeMillis(),
+                zone = ZoneId.systemDefault(),
+            ),
             padding = padding,
             onNavigate = onNavigate,
         )
@@ -101,6 +115,22 @@ internal fun SettingsHostScreen(
             onClearAll = onClearAllHistory,
         )
 
+        SettingsPage.TASKS -> ScheduledTasksScreen(
+            state = tasksState,
+            padding = padding,
+            onStartCreate = tasksViewModel::startCreate,
+            onStartEdit = tasksViewModel::startEdit,
+            onDraftChange = tasksViewModel::updateDraft,
+            onCancelEdit = tasksViewModel::cancelEdit,
+            onSave = tasksViewModel::save,
+            onDelete = tasksViewModel::delete,
+            onToggleEnabled = tasksViewModel::setEnabled,
+            onRunNow = tasksViewModel::runNow,
+            onClearRecords = tasksViewModel::clearRecords,
+            onRefreshPermissions = tasksViewModel::refreshPermissions,
+            onNotificationPromptShown = tasksViewModel::onNotificationPromptShown,
+        )
+
         SettingsPage.EMAIL -> EmailSettingsScreen(
             state = emailState,
             padding = padding,
@@ -122,6 +152,7 @@ internal fun SettingsHostScreen(
 private fun SettingsHomeScreen(
     state: UiState,
     emailSummary: String,
+    tasksSummary: String,
     padding: PaddingValues,
     onNavigate: (SettingsPage) -> Unit,
 ) {
@@ -146,6 +177,13 @@ private fun SettingsHomeScreen(
                 title = SettingsPage.CONVERSATION.title,
                 summary = conversationSettingsSummary(state),
                 onClick = { onNavigate(SettingsPage.CONVERSATION) },
+            )
+            HorizontalDivider()
+            SettingsNavRow(
+                icon = "⏰",
+                title = SettingsPage.TASKS.title,
+                summary = tasksSummary,
+                onClick = { onNavigate(SettingsPage.TASKS) },
             )
             HorizontalDivider()
             SettingsNavRow(

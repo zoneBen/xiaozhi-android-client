@@ -358,6 +358,37 @@ internal fun SettingsChoice(
     options: List<Pair<String, Boolean>>,
     onSelect: (Int) -> Unit,
 ) {
+    SettingsChoiceRow(icon, title, subtitle, options, onChipClick = onSelect)
+}
+
+/**
+ * 一行多选（目前用于"每周哪几天"）。
+ *
+ * 和 [SettingsChoice] 长得一模一样、只差一个字的语义——**这不是重复，是分工**：
+ * 单选点第二下没反应，多选点第二下要取消。共用一个函数名的话，调用方就得从
+ * 上下文猜自己是哪种，而猜错的表现是"点一下把别的选了/取消不掉"，很难一眼看出来。
+ * 所以两个名字、一份长相（[SettingsChoiceRow]）。
+ */
+@Composable
+internal fun SettingsMultiChoice(
+    icon: String,
+    title: String,
+    subtitle: String,
+    options: List<Pair<String, Boolean>>,
+    onToggle: (Int) -> Unit,
+) {
+    SettingsChoiceRow(icon, title, subtitle, options, onChipClick = onToggle)
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun SettingsChoiceRow(
+    icon: String,
+    title: String,
+    subtitle: String,
+    options: List<Pair<String, Boolean>>,
+    onChipClick: (Int) -> Unit,
+) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -376,14 +407,16 @@ internal fun SettingsChoice(
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 options.forEachIndexed { index, (label, selected) ->
-                    ChoiceChip(label = label, selected = selected) { onSelect(index) }
+                    ChoiceChip(label = label, selected = selected) { onChipClick(index) }
                 }
             }
-            Text(
-                text = subtitle,
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
+            if (subtitle.isNotBlank()) {
+                Text(
+                    text = subtitle,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
         }
     }
 }
