@@ -100,8 +100,11 @@ class ScheduledTaskRunner(
             finish(execution, TaskOutcome.SKIPPED_MISSED, "任务已被删除，这次不执行了")
             return
         }
-        if (!task.enabled) {
-            finish(execution, TaskOutcome.SKIPPED_MISSED, "任务已被停用，这次不执行了")
+        // 「任务被停用」这一档不能只看 `task.enabled`：一次性任务用掉之后会自己关掉
+        // （receiver 那一步 retire），那是触发的收尾而不是用户改主意。判定抽在
+        // [queuedExecutionSkipReason] 里，连理由一起写在那边。
+        queuedExecutionSkipReason(task, execution)?.let { reason ->
+            finish(execution, TaskOutcome.SKIPPED_MISSED, reason)
             return
         }
 
