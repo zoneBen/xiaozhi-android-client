@@ -26,6 +26,7 @@ import me.xiaozhi.androidclient.audio.XiaozhiAudioEngine
 import me.xiaozhi.androidclient.camera.CameraFacing
 import me.xiaozhi.androidclient.camera.CameraVisionTool
 import me.xiaozhi.androidclient.data.AppPreferences
+import me.xiaozhi.androidclient.data.ConversationRepository
 import me.xiaozhi.androidclient.data.RoleProfileRepository
 import me.xiaozhi.androidclient.data.StoredConfig
 import me.xiaozhi.androidclient.device.BodyGuargzController
@@ -149,6 +150,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val preferences = AppPreferences(application)
     private val storedConfig = preferences.load()
     private val roleProfileRepository = RoleProfileRepository(application)
+    private val conversationRepository = ConversationRepository(application)
+
+    /** 距上次 [ConversationRepository.pruneRole] 又写了几条消息，见 [persistMessage]。 */
+    private var messagesSincePrune = 0
     private val digitalHumanAssets = me.xiaozhi.androidclient.digitalhuman.DigitalHumanAssetManager(application)
 
     private val okHttpClient = OkHttpClient.Builder()
@@ -303,6 +308,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             wavDumpEnabled = storedConfig.debugWavDumpEnabled,
         )
         reloadRoleProfiles()
+        // 冷启动把当前角色的最近对话从数据库载回来。
+        //
+        // 放在 reloadRoleProfiles() **之后**：activeRoleId 是它确定的，提前调用只会拿到
+        // 上次进程留下的旧 id（甚至空串），载出来的是别人的历史。
+        // 与 autoStartDeviceSession 之间不需要额外同步——两者互不碰 chatMessages。
+        loadConversationForRole(activeRoleId)
         viewModelScope.launch {
             realtimeClient.events.collect(::handleRealtimeEvent)
         }
@@ -1049,6 +1060,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             if (next != null) selectRole(next.id) else {
                 activeRoleId = ""
                 updateAndPersist { copy(activeRoleId = "", activeRoleName = "", roleProfiles = emptyList()) }
+                // 角色全删光了，屏幕上那批消息已经不属于任何角色。不清掉的话，
+                // 它们会带着一个空 activeRoleId 继续显示，而且再也不会被持久化到任何地方。
+                loadConversationForRole("")
                 reloadRoleProfiles()
             }
         } else {
@@ -1600,7 +1614,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         cancelReconnect()
         cancelExpectedGoodbyeDisconnect()
         clearPendingConversation()
-        clearRoleConversation()
+        loadConversationForRole(targetRole.id)
         stopActivationPolling()
         pendingActivationInfo = null
         audioEngine.clearPlayback { updateState { copy(isAssistantSpeaking = it) } }
@@ -1643,7 +1657,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         cancelReconnect()
         cancelExpectedGoodbyeDisconnect()
         clearPendingConversation()
-        clearRoleConversation()
+        loadConversationForRole(targetRole.id)
         stopActivationPolling()
         pendingActivationInfo = null
         pendingWakePhrase = phrase
@@ -2986,8 +3000,47 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         addLog("$reason，已取消排队中的对话")
     }
 
-    private fun clearRoleConversation() {
+    /**
+     * 切角色时的对话重置 + 历史载入。
+     *
+     * 以前这里只是**清空**——因为消息本来就只活在内存里，切走就没了。现在历史按角色
+     * 存在数据库里，「重置」之后必须紧接着把目标角色的最近若干条载回来，
+     * 否则用户切回去会发现自己的对话凭空消失。这正是「历史按角色分组」这条决策的必然结果。
+     *
+     * 载入是异步的，期间用户可能又切了角色（[roleSwitchGeneration] 会变），
+     * 也可能新一轮对话已经开始说话。所以：
+     *  - 结果回来时先核对 generation 与角色 id，过期的直接丢掉；
+     *  - 合并时按 id 去重再前置——载入期间新产生的消息已经落进 `chatMessages` 了，
+     *    而那些消息同时也可能已经被写进数据库、出现在这次查询结果里。
+     *    不去重就会看到重复气泡。
+     */
+    private fun loadConversationForRole(roleId: String) {
         updateState(UiState::resetConversationForRoleSwitch)
+        if (roleId.isBlank()) {
+            return
+        }
+        val generation = roleSwitchGeneration
+        viewModelScope.launch {
+            val loaded = runCatching {
+                conversationRepository.recentForRole(roleId, ConversationRepository.DEFAULT_LOAD_LIMIT)
+            }.getOrElse {
+                addLog("读取对话历史失败：${it.message ?: it.javaClass.simpleName}")
+                emptyList()
+            }
+            if (loaded.isEmpty()) {
+                return@launch
+            }
+            if (generation != roleSwitchGeneration || roleId != activeRoleId) {
+                return@launch
+            }
+            updateState {
+                val alreadyShown = chatMessages.mapTo(HashSet()) { it.id }
+                copy(
+                    chatMessages = (loaded.filterNot { it.id in alreadyShown } + chatMessages).takeLast(100),
+                )
+            }
+            addLog("已载入${activeRoleProfile().displayName}的最近 ${loaded.size} 条对话")
+        }
     }
 
     private fun isBluetoothMicActive(): Boolean {
@@ -3000,21 +3053,28 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             return
         }
         val timestamp = timestamp()
+        // 在 update 的 lambda 里赋值、在 lambda 之外消费：这样去重早退那条路不会产生
+        // 数据库写入，id 也只在真正要插入时才从序列里取一个（不浪费号）。
+        //
+        // `MutableStateFlow.update` 在竞争下会重跑 lambda，最后一次（也就是真正 CAS 成功
+        // 那次）的赋值会覆盖前面的，所以这里拿到的必定是最终落进状态里的那条。
+        var stored: ChatMessage? = null
         updateState {
             val lastMessage = chatMessages.lastOrNull()
             if (lastMessage?.role == role && lastMessage.text == trimmed) {
                 this
             } else {
-                copy(
-                    chatMessages = (chatMessages + ChatMessage(
-                        id = newMessageId(),
-                        role = role,
-                        text = trimmed,
-                        timestamp = timestamp,
-                    )).takeLast(100),
+                val message = ChatMessage(
+                    id = newMessageId(),
+                    role = role,
+                    text = trimmed,
+                    timestamp = timestamp,
                 )
+                stored = message
+                copy(chatMessages = (chatMessages + message).takeLast(100))
             }
         }
+        stored?.let(::persistMessage)
     }
 
     /**
@@ -3029,18 +3089,51 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      */
     private fun addPhotoMessage(file: File) {
         val timestamp = timestamp()
+        val message = ChatMessage(
+            id = newMessageId(),
+            role = ChatRole.ASSISTANT,
+            text = PHOTO_CAPTION,
+            timestamp = timestamp,
+            imagePath = file.absolutePath,
+        )
         updateState {
-            copy(
-                chatMessages = (chatMessages + ChatMessage(
-                    id = newMessageId(),
-                    role = ChatRole.ASSISTANT,
-                    text = PHOTO_CAPTION,
-                    timestamp = timestamp,
-                    imagePath = file.absolutePath,
-                )).takeLast(100),
-            )
+            copy(chatMessages = (chatMessages + message).takeLast(100))
         }
+        persistMessage(message)
         addLog("摄像头拍照已贴到对话里：${file.name}")
+    }
+
+    /**
+     * 把一条消息写进长期存档。
+     *
+     * **内存里的 `takeLast(100)` 窗口照旧保留**——那是给渲染用的；数据库才是让消息
+     * 活过进程重启的东西。两条路并不同步也不需要同步。
+     *
+     * 排序键直接用 `message.id`：那个 id 本来就是「每进程从当前毫秒起自增」的序列，
+     * 与插入时刻同源且单调，比另取一次 `System.currentTimeMillis()` 更能保证
+     * 「同一毫秒插入的多条」之间顺序稳定。
+     *
+     * 写失败只记日志、不抛：历史记录丢一条不该把正在进行的对话打断。
+     */
+    private fun persistMessage(message: ChatMessage) {
+        val roleId = activeRoleId
+        if (roleId.isBlank()) {
+            return
+        }
+        val shouldPrune = ++messagesSincePrune >= ConversationRepository.PRUNE_EVERY
+        if (shouldPrune) {
+            messagesSincePrune = 0
+        }
+        viewModelScope.launch {
+            runCatching {
+                conversationRepository.append(roleId, message, message.id)
+                if (shouldPrune) {
+                    conversationRepository.pruneRole(roleId)
+                }
+            }.onFailure {
+                addLog("对话历史写入失败：${it.message ?: it.javaClass.simpleName}")
+            }
+        }
     }
 
     /**

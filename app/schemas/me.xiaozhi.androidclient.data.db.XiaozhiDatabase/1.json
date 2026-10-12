@@ -1,0 +1,400 @@
+{
+  "formatVersion": 1,
+  "database": {
+    "version": 1,
+    "identityHash": "0e8e5e201bfae5781bf30fc69eb9bcbe",
+    "entities": [
+      {
+        "tableName": "conversation_messages",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER NOT NULL, `roleId` TEXT NOT NULL, `role` TEXT NOT NULL, `text` TEXT NOT NULL, `timestamp` TEXT NOT NULL, `imagePath` TEXT, `createdAtEpochMs` INTEGER NOT NULL, PRIMARY KEY(`id`))",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "roleId",
+            "columnName": "roleId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "role",
+            "columnName": "role",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "text",
+            "columnName": "text",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "timestamp",
+            "columnName": "timestamp",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "imagePath",
+            "columnName": "imagePath",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "createdAtEpochMs",
+            "columnName": "createdAtEpochMs",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_conversation_messages_roleId_createdAtEpochMs",
+            "unique": false,
+            "columnNames": [
+              "roleId",
+              "createdAtEpochMs"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_conversation_messages_roleId_createdAtEpochMs` ON `${TABLE_NAME}` (`roleId`, `createdAtEpochMs`)"
+          }
+        ],
+        "foreignKeys": []
+      },
+      {
+        "tableName": "scheduled_tasks",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `title` TEXT NOT NULL, `kind` TEXT NOT NULL, `intervalMinutes` INTEGER, `hourOfDay` INTEGER, `minuteOfHour` INTEGER, `daysOfWeekMask` INTEGER, `daysOfMonthCsv` TEXT, `fireAtEpochMs` INTEGER, `anchorEpochMs` INTEGER NOT NULL, `action` TEXT NOT NULL, `text` TEXT, `emailTo` TEXT, `emailSubject` TEXT, `allowCatchUp` INTEGER NOT NULL, `enabled` INTEGER NOT NULL, `lastFireAtEpochMs` INTEGER, `nextFireAtEpochMs` INTEGER, `createdAtEpochMs` INTEGER NOT NULL, `updatedAtEpochMs` INTEGER NOT NULL)",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "title",
+            "columnName": "title",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "kind",
+            "columnName": "kind",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "intervalMinutes",
+            "columnName": "intervalMinutes",
+            "affinity": "INTEGER",
+            "notNull": false
+          },
+          {
+            "fieldPath": "hourOfDay",
+            "columnName": "hourOfDay",
+            "affinity": "INTEGER",
+            "notNull": false
+          },
+          {
+            "fieldPath": "minuteOfHour",
+            "columnName": "minuteOfHour",
+            "affinity": "INTEGER",
+            "notNull": false
+          },
+          {
+            "fieldPath": "daysOfWeekMask",
+            "columnName": "daysOfWeekMask",
+            "affinity": "INTEGER",
+            "notNull": false
+          },
+          {
+            "fieldPath": "daysOfMonthCsv",
+            "columnName": "daysOfMonthCsv",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "fireAtEpochMs",
+            "columnName": "fireAtEpochMs",
+            "affinity": "INTEGER",
+            "notNull": false
+          },
+          {
+            "fieldPath": "anchorEpochMs",
+            "columnName": "anchorEpochMs",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "action",
+            "columnName": "action",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "text",
+            "columnName": "text",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "emailTo",
+            "columnName": "emailTo",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "emailSubject",
+            "columnName": "emailSubject",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "allowCatchUp",
+            "columnName": "allowCatchUp",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "enabled",
+            "columnName": "enabled",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "lastFireAtEpochMs",
+            "columnName": "lastFireAtEpochMs",
+            "affinity": "INTEGER",
+            "notNull": false
+          },
+          {
+            "fieldPath": "nextFireAtEpochMs",
+            "columnName": "nextFireAtEpochMs",
+            "affinity": "INTEGER",
+            "notNull": false
+          },
+          {
+            "fieldPath": "createdAtEpochMs",
+            "columnName": "createdAtEpochMs",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "updatedAtEpochMs",
+            "columnName": "updatedAtEpochMs",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": true,
+          "columnNames": [
+            "id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_scheduled_tasks_nextFireAtEpochMs",
+            "unique": false,
+            "columnNames": [
+              "nextFireAtEpochMs"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_scheduled_tasks_nextFireAtEpochMs` ON `${TABLE_NAME}` (`nextFireAtEpochMs`)"
+          }
+        ],
+        "foreignKeys": []
+      },
+      {
+        "tableName": "task_executions",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `taskId` INTEGER NOT NULL, `taskTitle` TEXT NOT NULL, `action` TEXT NOT NULL, `scheduledAtEpochMs` INTEGER NOT NULL, `firedAtEpochMs` INTEGER, `status` TEXT NOT NULL, `outcome` TEXT, `isCatchUp` INTEGER NOT NULL, `attempts` INTEGER NOT NULL, `nextAttemptAtEpochMs` INTEGER, `detail` TEXT, `createdAtEpochMs` INTEGER NOT NULL)",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "taskId",
+            "columnName": "taskId",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "taskTitle",
+            "columnName": "taskTitle",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "action",
+            "columnName": "action",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "scheduledAtEpochMs",
+            "columnName": "scheduledAtEpochMs",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "firedAtEpochMs",
+            "columnName": "firedAtEpochMs",
+            "affinity": "INTEGER",
+            "notNull": false
+          },
+          {
+            "fieldPath": "status",
+            "columnName": "status",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "outcome",
+            "columnName": "outcome",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "isCatchUp",
+            "columnName": "isCatchUp",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "attempts",
+            "columnName": "attempts",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "nextAttemptAtEpochMs",
+            "columnName": "nextAttemptAtEpochMs",
+            "affinity": "INTEGER",
+            "notNull": false
+          },
+          {
+            "fieldPath": "detail",
+            "columnName": "detail",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "createdAtEpochMs",
+            "columnName": "createdAtEpochMs",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": true,
+          "columnNames": [
+            "id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_task_executions_taskId_createdAtEpochMs",
+            "unique": false,
+            "columnNames": [
+              "taskId",
+              "createdAtEpochMs"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_task_executions_taskId_createdAtEpochMs` ON `${TABLE_NAME}` (`taskId`, `createdAtEpochMs`)"
+          },
+          {
+            "name": "index_task_executions_status_nextAttemptAtEpochMs",
+            "unique": false,
+            "columnNames": [
+              "status",
+              "nextAttemptAtEpochMs"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_task_executions_status_nextAttemptAtEpochMs` ON `${TABLE_NAME}` (`status`, `nextAttemptAtEpochMs`)"
+          }
+        ],
+        "foreignKeys": []
+      },
+      {
+        "tableName": "hardware_probe",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER NOT NULL, `microphoneReady` INTEGER NOT NULL, `microphoneMessage` TEXT NOT NULL, `hardwareControlAvailable` INTEGER NOT NULL, `deviceControlStatus` TEXT NOT NULL, `cameraFacingChoicesCsv` TEXT NOT NULL, `volumeAvailable` INTEGER NOT NULL, `probedAtEpochMs` INTEGER NOT NULL, PRIMARY KEY(`id`))",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "microphoneReady",
+            "columnName": "microphoneReady",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "microphoneMessage",
+            "columnName": "microphoneMessage",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "hardwareControlAvailable",
+            "columnName": "hardwareControlAvailable",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "deviceControlStatus",
+            "columnName": "deviceControlStatus",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "cameraFacingChoicesCsv",
+            "columnName": "cameraFacingChoicesCsv",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "volumeAvailable",
+            "columnName": "volumeAvailable",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "probedAtEpochMs",
+            "columnName": "probedAtEpochMs",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "id"
+          ]
+        },
+        "indices": [],
+        "foreignKeys": []
+      }
+    ],
+    "views": [],
+    "setupQueries": [
+      "CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)",
+      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, '0e8e5e201bfae5781bf30fc69eb9bcbe')"
+    ]
+  }
+}
