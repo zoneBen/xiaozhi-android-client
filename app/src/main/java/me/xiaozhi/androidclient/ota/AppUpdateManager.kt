@@ -16,6 +16,8 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.withContext
+import me.xiaozhi.androidclient.backend.BackendApiClient
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONObject
@@ -23,7 +25,13 @@ import org.json.JSONObject
 class AppUpdateManager(
     private val context: Context,
     private val baseHttpClient: OkHttpClient,
-    private val updateIndexUrl: String = DEFAULT_UPDATE_INDEX_URL,
+    /**
+     * 更新索引地址。做成 lambda 而不是 String：设置页里能改上报后端地址，
+     * 改完就该立刻生效 —— 否则用户得重启一次 App 才能让更新源跟着走。
+     */
+    private val updateIndexUrl: () -> String = { DEFAULT_UPDATE_INDEX_URL },
+    /** 当前设备的唯一码，作为 query 一起带给自建升级接口（服务端用于将来做分设备灰度）。 */
+    private val deviceUid: () -> String = { "" },
 ) {
     /** 下载 54MB 安装包用。
      *
@@ -67,30 +75,22 @@ class AppUpdateManager(
         runCatching {
             // 更新源没配就**一个包都不发**，直接回「没这功能」。
             //
-            // 这必须在下面那三个候选地址之前：本定制版的占位地址是 `.invalid`，
-            // 不拦的话每次检查（含每次冷启动的静默检查）都要白打三个注定失败的请求，
-            // 用户点「检查更新」还会拿到一句英文 DNS 报错。见 `isUpdateIndexConfigured`。
-            if (!isUpdateIndexConfigured(updateIndexUrl)) {
+            // 两种情况会走到这里：① 设置页把地址清空了；② 客户端没有 appSecret，
+            // 这时 `MainViewModel` 会把地址给成 `.invalid` 占位 —— 发出去也只会拿到 401，
+            // 不如让它安静地当作「没这功能」，用户看到的是「没有在线更新」而不是一句 HTTP 401。
+            val indexUrl = updateIndexUrl().trim()
+            if (!isUpdateIndexConfigured(indexUrl)) {
                 return@withContext UpdateCheckResult.NotConfigured
             }
 
-            // 顺序很重要：**镜像优先，GitHub 原链放最后**。
-            // raw.githubusercontent.com 在部分网络下不是快速失败而是直接挂住，
-            // 把它排在第一个，用户就要先白等一个超时才轮到能用的镜像。
-            // 两个镜像在国内都能直连，正常情况下第一个就返回了。
-            val candidateIndexUrls = listOf(
-                "https://ghfast.top/$updateIndexUrl",
-                "https://gh-proxy.com/$updateIndexUrl",
-                updateIndexUrl
-            )
+            // 候选顺序由 buildIndexCandidates 决定：GitHub 地址才套镜像前缀，
+            // 自建后端（http://api.mrcong.cn:300/...）只返回它自己那一条。
+            val candidateIndexUrls = buildIndexCandidates(indexUrl)
 
             var lastErrorMsg = "检测更新失败"
             for (url in candidateIndexUrls) {
                 try {
-                    val request = Request.Builder()
-                        .url(url)
-                        .header("Cache-Control", "no-cache")
-                        .build()
+                    val request = buildIndexRequest(url, currentVersionCode)
 
                     configHttpClient.newCall(request).execute().use { response ->
                     if (response.isSuccessful) {
@@ -130,6 +130,35 @@ class AppUpdateManager(
         }.getOrElse { e ->
             UpdateCheckResult.Error(e.message ?: "网络连接异常")
         }
+    }
+
+    /**
+     * 组一个查版本的 GET 请求。
+     *
+     * 自建升级接口（`v1/upgrade.php`）要求签名头和这几个 query：
+     * `deviceUid` / `versionCode` / `channel`，其中 `versionCode` 是服务端算
+     * 「要不要强制升级」的依据（低于 `min_support_version` 就强制）。
+     *
+     * 指向 GitHub 的镜像源不需要这些东西，多带几个头那边会直接忽略 ——
+     * 所以这里不做分支，只有一条路径。
+     */
+    private fun buildIndexRequest(rawUrl: String, currentVersionCode: Int): Request {
+        val parsed = rawUrl.toHttpUrlOrNull()
+            ?: throw IllegalStateException("更新源地址非法: $rawUrl")
+
+        val urlBuilder = parsed.newBuilder()
+            .addQueryParameter("versionCode", currentVersionCode.toString())
+            .addQueryParameter("channel", UPDATE_CHANNEL)
+        deviceUid().takeIf { it.isNotBlank() }?.let { urlBuilder.addQueryParameter("deviceUid", it) }
+        val url = urlBuilder.build()
+
+        val builder = Request.Builder()
+            .url(url)
+            .header("Cache-Control", "no-cache")
+            .header("Accept", "application/json")
+            .get()
+        BackendApiClient.signatureHeaders(GET, url).forEach { (name, value) -> builder.header(name, value) }
+        return builder.build()
     }
 
     suspend fun downloadApk(
@@ -409,20 +438,32 @@ class AppUpdateManager(
     }
 
     companion object {
+        private const val GET = "GET"
+        private const val UPDATE_CHANNEL = "default"
+
         /**
-         * 更新索引地址。**本定制版刻意留成一个不可达的占位。**
+         * 更新索引地址：**本定制版自己的后端**。
          *
-         * 原来它指向上游项目的 version.json，那在本定制版里是个**有害**的默认值：
-         * 检查更新会成功查到上游的新版本、然后在「关于」页上劝用户下载安装，
-         * 而那个包装上去会直接覆盖掉本定制版的所有改动。留一个解析不出来的域名，
-         * 「检查更新」就会老老实实地快速失败并如实显示失败——这是本定制版想要的诚实行为。
+         * 以前这里是个刻意的不可达占位（`update.example.invalid`），因为那时没有更新服务；
+         * 现在 `v1/upgrade.php` 就是它。响应结构和老的 `version.json` 一模一样
+         * （顶层平铺 versionCode / downloadUrl / sha256 …），所以下面那几行解析一行都没动。
          *
-         * `.invalid` 是 RFC 2606 保留的顶级域，保证永远不解析，不会误撞上真实主机。
+         * 客户端没有 appSecret 时，`MainViewModel` 会改用 [PLACEHOLDER_UPDATE_INDEX_URL]，
+         * 让「检查更新」安静地报「没这功能」，而不是发一个注定 401 的请求。
          *
-         * 将来真要自建更新源，把这里换成一个**本定制版自己发布**的 version.json 地址；
-         * 不要指回上游。签名校验在 [EXPECTED_SIGNER_SHA256]，两者必须一起改。
+         * ## 上传新版本时注意
+         *
+         * 服务端后台传的 APK **必须用与 [EXPECTED_SIGNER_SHA256] 一致的证书签名**，
+         * 否则 [verifyDownloadedApk] 会在装之前把它拒掉。这是特性，不是 bug。
          */
-        const val DEFAULT_UPDATE_INDEX_URL =
+        const val DEFAULT_UPDATE_INDEX_URL: String =
+            "http://api.mrcong.cn:300/apps/xiaozhi_android_client/v1/upgrade.php"
+
+        /**
+         * 「更新源不可用」的占位地址。`.invalid` 是 RFC 2606 保留的顶级域，保证永不解析，
+         * 不会误撞上真实主机。见 [isUpdateIndexConfigured]。
+         */
+        const val PLACEHOLDER_UPDATE_INDEX_URL: String =
             "https://update.example.invalid/xiaozhi-android-client/version.json"
 
         /**

@@ -15,7 +15,10 @@ sealed interface UpdateCheckResult {
     data class Error(val message: String) : UpdateCheckResult
 
     /**
-     * 更新源压根没配（本定制版的常态，见 [isUpdateIndexConfigured]）。
+     * 更新源压根没配（见 [isUpdateIndexConfigured]）。
+     *
+     * 现在只有在**客户端没配 appSecret** 时才会出现：那种情况下 `MainViewModel` 会把
+     * 更新源给成 `.invalid` 占位，免得往后端发一个注定 401 的请求。
      *
      * 刻意**不复用 [Error]**：`Error` 会被界面渲染成「检查更新失败: …」+ 一句网络层
      * 的英文原文，而这里根本不是失败——是这个版本没有这个功能。两者的用户动作完全不同

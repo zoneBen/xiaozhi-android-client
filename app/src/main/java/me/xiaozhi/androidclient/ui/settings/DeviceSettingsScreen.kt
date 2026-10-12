@@ -28,6 +28,9 @@ import me.xiaozhi.androidclient.model.UiState
  * `BodyGuargzController`），这台机器认不认只能实测。把结论写在这儿，现场的人一眼就能
  * 分清"是功能没开"还是"这台机器压根没有这个硬件"——否则只会看到"叫它转它不转"，
  * 然后以为 App 坏了。
+ *
+ * **后台上报不在这里**：它是纯旁路，失败不影响任何本地功能，给它一块界面只会让人
+ * 以为"这里有东西要管"。基址是编译期写死的，见 `BackendConfig`。
  */
 @Composable
 internal fun DeviceSettingsScreen(

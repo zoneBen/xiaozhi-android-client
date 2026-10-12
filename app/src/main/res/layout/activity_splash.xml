@@ -4,6 +4,9 @@
   尺寸写死 220dp 而不是 match_parent：ImageView 的 fitCenter 在缩小之外也会放大，
   铺满全屏的话这个 220dp 的方图会被撑到整个屏幕高度，气泡大得离谱。
   正方形 + fitCenter 保证任何屏幕比例下圆环都不会变成椭圆。
+
+  最上面那层 splash_ad_layer 是运营投放的开屏素材（可能有，可能没有）。
+  **默认 gone**：没有素材时整棵子树不参与布局、不参与绘制，用户看到的就是原来那 8 帧动画。
 -->
 <FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
@@ -18,5 +21,63 @@
         android:contentDescription="@string/splash_image_description"
         android:scaleType="fitCenter"
         android:src="@drawable/splash_frames" />
+
+    <!--
+      开屏素材层。放在最后 = 画在最上面，盖住下面那 8 帧动画。
+      时长到了先淡出、同时才去起主界面 —— 中间这段淡出正好填上主界面画首帧的那 0.4 秒，
+      用户看到的是「广告放完了」，不是一次跳变。
+      （按 HOME 再切回来根本不会走到这里，见 SplashActivity.onCreate 里 isMainProcessAlive
+      那个分支。）
+      background 写死不透明黑：图片是按 centerCrop 铺满的，理论上盖得住整个屏幕，
+      但换一张比例极端的图时边缘仍可能露缝，漏出来的会是下面那圈气泡，很难看。
+    -->
+    <FrameLayout
+        android:id="@+id/splash_ad_layer"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:background="@android:color/black"
+        android:visibility="gone">
+
+        <ImageView
+            android:id="@+id/splash_ad_image"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:contentDescription="@string/splash_ad_image_description"
+            android:scaleType="centerCrop" />
+
+        <!--
+          文案压在图的下沿。半透明黑底是必须的：素材是客户自己传的，
+          谁也不知道标题底下那块像素是白是花，不垫一层就总有一半情况读不清。
+        -->
+        <LinearLayout
+            android:id="@+id/splash_ad_text_row"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_gravity="bottom"
+            android:background="#99000000"
+            android:orientation="vertical"
+            android:padding="20dp">
+
+            <TextView
+                android:id="@+id/splash_ad_title"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:ellipsize="end"
+                android:maxLines="2"
+                android:textColor="#FFFFFF"
+                android:textSize="20sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:id="@+id/splash_ad_subtitle"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="6dp"
+                android:ellipsize="end"
+                android:maxLines="2"
+                android:textColor="#CCFFFFFF"
+                android:textSize="14sp" />
+        </LinearLayout>
+    </FrameLayout>
 
 </FrameLayout>

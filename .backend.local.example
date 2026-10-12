@@ -1,0 +1,16 @@
+# 自建后端（api.mrcong.cn:300/apps/xiaozhi_android_client）的接口签名密钥。
+#
+# 用法：
+#     cp .backend.local.example .backend.local
+#     然后把 appSecret 填成服务器上 php/config.php 里 sign.app_secret 的值
+#
+# .backend.local 已在 .gitignore 里 —— 这个仓库会发布到 GitHub，
+# 密钥绝不能提交。没有这个文件也能编译，只是客户端不会向后端发任何请求
+# （心跳 / 开屏 / 升级会整块跳过，而不是发一堆注定 401 的包）。
+#
+# 只在数值对不上时才需要改 appKey，它不参与「保密」，只用于服务端识别来源。
+appSecret=
+
+# 基址不用配，它是编译期常量 BackendConfig.DEFAULT_BASE_URL，
+# 值就是下一行这个（客户端里没有运行期改它的入口）。
+# baseUrl=http://api.mrcong.cn:300/apps/xiaozhi_android_client

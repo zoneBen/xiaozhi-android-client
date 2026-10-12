@@ -13,6 +13,25 @@ val releaseSigningProperties = Properties().apply {
     }
 }
 
+// 自建后端接口的签名密钥。走 .backend.local（已在 .gitignore 里），**不写进源码**：
+// 这个仓库是要发布到 GitHub 的，把生产密钥提交上去就是真的泄露了。
+// 模板见 .backend.local.example。
+//
+// 注意这只防「密钥进版本库」，不防「密钥被逆向」——它最终会编译进 APK，
+// 谁都提得出来。见 backend/BackendConfig.kt 里的说明。
+val backendProperties = Properties().apply {
+    val backendFile = rootProject.file(".backend.local")
+    if (backendFile.exists()) {
+        backendFile.inputStream().use(::load)
+    }
+}
+
+// 会直接拼进生成代码，引号和反斜杠必须先转义，否则密钥里带一个引号就是编译错误。
+val backendAppSecret: String = backendProperties
+    .getProperty("appSecret", "")
+    .replace("\\", "\\\\")
+    .replace("\"", "\\\"")
+
 android {
     namespace = "me.xiaozhi.androidclient"
     compileSdk = 34
@@ -23,6 +42,10 @@ android {
         targetSdk = 34
         versionCode = 15
         versionName = "1.2.11"
+
+        // 为空时客户端不会向自建后端发任何请求（心跳/开屏/升级全部跳过），
+        // 而不是发一堆注定 401 的包。见 BackendConfig.isConfigured。
+        buildConfigField("String", "BACKEND_APP_SECRET", "\"$backendAppSecret\"")
     }
 
     signingConfigs {
@@ -98,6 +121,10 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.4")
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.4")
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.4")
+    // 心跳兜底。这台设备内存小、App 进程常被系统回收，只靠 viewModelScope 里的
+    // 循环会在进程死掉后彻底静默；WorkManager 周期任务能在进程被回收后仍被系统唤醒。
+    // 系统对周期任务的下限是 15 分钟，正好等于后端默认的心跳间隔。
+    implementation("androidx.work:work-runtime-ktx:2.9.1")
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.ui:ui-tooling-preview")
     implementation("androidx.compose.foundation:foundation")

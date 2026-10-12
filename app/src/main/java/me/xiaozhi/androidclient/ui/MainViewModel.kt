@@ -18,15 +18,26 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlin.math.min
 import me.xiaozhi.androidclient.audio.XiaozhiAudioEngine
+import me.xiaozhi.androidclient.backend.BackendConfig
+import me.xiaozhi.androidclient.backend.BackendFactory
+import me.xiaozhi.androidclient.backend.HeartbeatOutcome
+import me.xiaozhi.androidclient.backend.HeartbeatReporter
+import me.xiaozhi.androidclient.backend.HeartbeatWorker
+import me.xiaozhi.androidclient.backend.SplashAdRefresher
+import me.xiaozhi.androidclient.backend.SplashAdService
+import me.xiaozhi.androidclient.backend.SplashAdStore
+import me.xiaozhi.androidclient.backend.SplashRefreshOutcome
 import me.xiaozhi.androidclient.camera.CameraFacing
 import me.xiaozhi.androidclient.camera.CameraVisionTool
 import me.xiaozhi.androidclient.data.AppPreferences
 import me.xiaozhi.androidclient.data.ConversationRepository
+import me.xiaozhi.androidclient.data.DeviceIdentityStore
 import me.xiaozhi.androidclient.data.HardwareProbeRepository
 import me.xiaozhi.androidclient.data.db.HardwareProbeEntity
 import me.xiaozhi.androidclient.data.toProbeCsv
@@ -98,6 +109,17 @@ private const val WAKE_WORD_DISABLED = "未启用"
 private const val WAKE_WORD_STANDBY = "待命中"
 private const val DEFAULT_AUDIO_ROUTE = "媒体输出：扬声器 / 输入：机身麦克风"
 private const val AUTO_START_DELAY_MS = 600L
+
+/**
+ * 静默检查更新的最小间隔。
+ *
+ * 服务器是自托管的、随时会挂，而冷启动是这个 App 最高频的动作 —— 挂着的时候
+ * 每次启动都要为一次「大概率没有新版本」的检查白等一轮超时。手动检查不受此限。
+ */
+private const val SILENT_UPDATE_CHECK_INTERVAL_MS = 24L * 60 * 60 * 1000
+
+/** 心跳失败后的首次重试延迟，之后每轮翻倍（上限是服务端下发的正常间隔）。 */
+private const val HEARTBEAT_RETRY_BASE_MS = 30_000L
 private const val ACTIVATION_POLL_INTERVAL_MS = 4_000L
 private const val ACTIVATION_POLL_MAX_ATTEMPTS = 90
 private const val AUTO_RECONNECT_DELAY_MS = 1_500L
@@ -182,7 +204,55 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         .writeTimeout(30, TimeUnit.SECONDS)
         .pingInterval(30, TimeUnit.SECONDS)
         .build()
-    val appUpdateManager = me.xiaozhi.androidclient.ota.AppUpdateManager(application, okHttpClient)
+
+    /**
+     * 自建后端（api.mrcong.cn）的几个组件。
+     *
+     * 三条链路全部是**纯旁路**：服务器是自托管的、随时会挂，所以心跳 / 开屏 / 升级
+     * 任何一条失败都只留一行日志。App 的本地功能（语音、定时任务、拍照、邮件）
+     * 不依赖其中任何一项，界面上也不会冒出任何错误提示 —— 这是刻意的，见各组件自己的说明。
+     *
+     * `BackendApiClient` 拿到的是上面这个客户端，但它会 `newBuilder()` 出一份
+     * connect 5s / read 8s 的短超时副本：心跳和开屏拉取都是「能拿到就赚、拿不到就算了」，
+     * 共用这里的 20s / 30s 意味着服务器挂掉时冷启动要白等一轮。
+     */
+    private val backendSettings = BackendFactory.settings(application)
+    private val backendApiClient = BackendFactory.apiClient(okHttpClient)
+    private val deviceIdentityStore = DeviceIdentityStore(application)
+
+    /**
+     * 心跳上报器。
+     *
+     * 三条 lambda 读的是**当时**的 `uiState`，不是构造时快照一份：用户在设置页改了
+     * 设备ID，下一次心跳就该用新值，不该等到重启 App 才生效（那会让服务端把同一台
+     * 机器认成两台）。
+     */
+    private val heartbeatReporter = HeartbeatReporter(
+        context = application,
+        apiClient = backendApiClient,
+        settings = backendSettings,
+        deviceUid = { uiState.value.deviceId },
+        clientId = { uiState.value.clientId },
+        serialNumber = { deviceIdentityStore.loadOrCreate(uiState.value.deviceId).serialNumber },
+    )
+
+    private val splashAdRefresher = SplashAdRefresher(
+        context = application,
+        service = SplashAdService(backendApiClient),
+        store = SplashAdStore(application),
+        deviceUid = { uiState.value.deviceId },
+    )
+
+    private var heartbeatLoopJob: Job? = null
+    private var splashAdRefreshJob: Job? = null
+
+    val appUpdateManager = me.xiaozhi.androidclient.ota.AppUpdateManager(
+        context = application,
+        baseHttpClient = okHttpClient,
+        // 做成 lambda：设置页能改上报基址，改完升级源跟着走，不用重启。
+        updateIndexUrl = ::backendUpdateIndexUrl,
+        deviceUid = { uiState.value.deviceId },
+    )
     private val otaConfigService = OtaConfigService(okHttpClient)
     private val realtimeClient = XiaozhiRealtimeClient(okHttpClient)
     private val networkTimeSynchronizer = NetworkTimeSynchronizer()
@@ -397,6 +467,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 .onFailure { addLog("定时任务恢复失败：${it.message.orEmpty()}") }
         }
         scheduledTaskRunner.start()
+        // 自建后端的旁路。**放在最后**：心跳、开屏拉取、升级检查都不该插到
+        // 「界面能用了」前面去 —— 服务器是自托管的，它慢不该拖慢冷启动。
+        startBackendSideChannels()
         viewModelScope.launch {
             delay(AUTO_START_DELAY_MS)
             networkTimeSynchronizer.awaitValidSystemTime(::addLog)
@@ -926,6 +999,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun checkForAppUpdate(silent: Boolean = false) {
         if (_uiState.value.isDownloadingUpdate) return
+        if (silent) {
+            // 静默检查降频到「每 24 小时最多一次」，手动点「检查更新」不受影响。
+            //
+            // 更新源以前是个不可达占位（一个源、立刻失败），现在换成了自建服务器：
+            // 服务器挂着的时候，每次冷启动都要白等一轮 configHttpClient 的超时
+            // （8 秒连接 + 12 秒读）。冷启动是这个 App 最高频的动作，不能拿它去陪一次
+            // 「大概率没有新版本」的检查。
+            val lastCheck = backendSettings.lastUpdateCheckAt
+            val elapsed = System.currentTimeMillis() - lastCheck
+            if (lastCheck > 0 && elapsed in 0 until SILENT_UPDATE_CHECK_INTERVAL_MS) return
+            // **水位记在这里，不是等检查结束再记**：服务器挂着时这一轮要等满超时，
+            // 而用户在超时窗口里切前后台会再触发一次冷启动。等结束再记等于没降频，
+            // 反而在最该安静的时候连打几轮。
+            backendSettings.lastUpdateCheckAt = System.currentTimeMillis()
+        }
         if (appUpdateCheckJob?.isActive == true) {
             // 关键：**手动点击优先**。
             //
@@ -963,18 +1051,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             addLog("检查更新失败：${result.message}")
                         }
                     }
-                    // 本定制版没接在线更新（占位地址不可达）。**不用「失败」这个词**——
-                    // 它是「这个版本没有这个功能」，不是「网络坏了」，说成失败会把用户
-                    // 引去查网络。升级方式就是直接装新版安装包。
+                    // 走到这里只有一个原因：**这个安装包没配 appSecret**（`.backend.local`
+                    // 缺失），所以更新源被换成了 `.invalid` 占位，连请求都没发出去。
+                    // **不用「失败」这个词**—— 它是「这个版本没接通升级服务」，不是
+                    // 「网络坏了」，说成失败会把用户引去查网络。
                     is me.xiaozhi.androidclient.ota.UpdateCheckResult.NotConfigured -> {
                         if (!silent) {
                             _uiState.update {
                                 it.copy(
-                                    updateCheckStatus = "本定制版未接入在线更新，升级请直接安装新版安装包",
+                                    updateCheckStatus = "当前安装包未配置升级服务，升级请直接安装新版安装包",
                                     availableUpdate = null,
                                 )
                             }
-                            addLog("检查更新：本定制版未接入在线更新（更新源为占位地址）")
+                            addLog("检查更新：客户端没有 appSecret，更新源为占位地址，未发出请求")
                         }
                     }
                 }
@@ -989,6 +1078,115 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     _uiState.update { it.copy(isCheckingUpdate = false) }
                     appUpdateCheckJob = null
                 }
+            }
+        }
+    }
+
+    // ---- 自建后端：心跳与开屏（升级那条路在 AppUpdateManager 里）----------------
+    //
+    // 这一整块的共同前提是：**服务器随时可能挂，挂了就等于什么都没发生**。
+    // 所以这里没有任何一处会因为失败去改界面状态、弹提示或挡住别的功能，
+    // 唯一的「错误表现」是日志里多一行。理由见 ota/.. 和 backend/ 下各处的说明。
+
+    /**
+     * 更新索引地址。
+     *
+     * 没配 appSecret 时给 `.invalid` 占位 —— 那种情况下签名头是空的，往后端发请求
+     * 只会拿到 401。宁可让「检查更新」安静地回「这个包没接通升级服务」，
+     * 也不要变成一个看起来像网络故障的 HTTP 401。
+     */
+    private fun backendUpdateIndexUrl(): String =
+        if (BackendConfig.isConfigured) {
+            BackendConfig.endpoint(BackendConfig.DEFAULT_BASE_URL, BackendConfig.PATH_UPGRADE)
+        } else {
+            me.xiaozhi.androidclient.ota.AppUpdateManager.PLACEHOLDER_UPDATE_INDEX_URL
+        }
+
+    /**
+     * 冷启动时拉起两条旁路：心跳循环 + 开屏素材刷新，外加 WorkManager 的兜底入队。
+     *
+     * 没配 appSecret 时**一条请求都不发**，界面上也不显示任何「后端出错」——
+     * 对用户来说它本来就没这功能。
+     */
+    private fun startBackendSideChannels() {
+        if (!BackendConfig.isConfigured) return
+        // 进程被系统回收后协程循环就没了，而这是台内存小、长期挂机的 kiosk 面板，
+        // 回收是常态。WorkManager 那条路是「设备到底在线没有」这个判断能成立的前提，
+        // 不是可选增强 —— 见 HeartbeatWorker 的说明。
+        HeartbeatWorker.enqueue(getApplication())
+        startBackendHeartbeat()
+        refreshSplashAd()
+    }
+
+    /**
+     * 心跳主循环，兼开屏刷新的节拍器。
+     *
+     * 节奏跟着服务端下发的 `intervalSec`（默认 900 秒，钳在 60～3600）走 ——
+     * 以后想调频率只要改数据库，不用重新发包。
+     *
+     * 失败时退避：从 30 秒起翻倍，最多到正常间隔。之所以要退避而不是死等一个间隔，
+     * 是因为刚装好、刚开机那几分钟最需要上报（服务端要靠它把设备登记进台账），
+     * 那时候服务器偶尔抽一下不该让这台机器等满 15 分钟才被看见。
+     */
+    private fun startBackendHeartbeat() {
+        if (heartbeatLoopJob?.isActive == true) return
+        heartbeatLoopJob = viewModelScope.launch {
+            var firstRound = true
+            var retryDelayMs = HEARTBEAT_RETRY_BASE_MS
+            while (isActive) {
+                // 第一轮用 boot：服务端拿它累加 app_open_count，也就是「这个 App 被打开过几次」。
+                val source =
+                    if (firstRound) HeartbeatReporter.SOURCE_BOOT else HeartbeatReporter.SOURCE_APP
+                firstRound = false
+
+                val intervalMs = backendSettings.heartbeatIntervalSec * 1000L
+                var nextDelayMs = intervalMs
+                when (val outcome = heartbeatReporter.report(source)) {
+                    is HeartbeatOutcome.Reported -> {
+                        retryDelayMs = HEARTBEAT_RETRY_BASE_MS
+                        // 顺路把 :splash 进程攒下的曝光/点击上报掉，并刷一次开屏素材。
+                        // 两个动作都要联网，跟着这条已经热起来的链路走，不必再排一个循环。
+                        splashAdRefresher.flushPendingReports()
+                        refreshSplashAd()
+                    }
+
+                    // 运营在后台把设备停了。心跳本身会停（reporter 内部判断），
+                    // 但这里照常按间隔转 —— reporter 留了 6 小时一次的探测，
+                    // 所以重新启用当天设备能自己发现，不用等用户去清应用数据。
+                    HeartbeatOutcome.Disabled -> Unit
+
+                    HeartbeatOutcome.Skipped -> Unit
+
+                    is HeartbeatOutcome.Failed -> {
+                        // **服务器挂了是常态，不是异常**。只留一行日志：界面上没有错误、
+                        // 语音会话不受影响、本地功能一个都不少。
+                        addLog(
+                            "心跳上报失败（不影响本地功能）：" +
+                                (outcome.error.message ?: outcome.error.javaClass.simpleName),
+                        )
+                        nextDelayMs = retryDelayMs
+                        retryDelayMs = min(retryDelayMs * 2, intervalMs)
+                    }
+                }
+                delay(nextDelayMs)
+            }
+        }
+    }
+
+    /**
+     * 拉开屏素材。**结果整个丢掉**，只有失败记一行日志。
+     *
+     * 开屏的语义是「有就展示、没有就直接进」，所以这一轮是换上了新图、是没变、
+     * 还是服务器压根没答上来，对界面没有任何差别 —— 缓存里有什么就展示什么。
+     */
+    private fun refreshSplashAd() {
+        if (!BackendConfig.isConfigured) return
+        if (splashAdRefreshJob?.isActive == true) return
+        splashAdRefreshJob = viewModelScope.launch {
+            val outcome = splashAdRefresher.refresh()
+            if (outcome is SplashRefreshOutcome.Failed) {
+                val error = outcome.error
+                addLog("开屏素材刷新失败（继续用本地缓存）：${error.message ?: error.javaClass.simpleName}")
             }
         }
     }

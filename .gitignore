@@ -12,3 +12,8 @@ captures/
 *.pem
 *.der
 .release-signing.local
+.backend.local
+app/release/
+
+# CodeGraph 的本地索引（6MB 的 sqlite），是工具产物不是源码，各人本地自己建
+.codegraph/

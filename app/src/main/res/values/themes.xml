@@ -12,7 +12,8 @@
              冷启动那几秒顶上会挂一条紫色栏杆，和浅色界面完全不搭。 -->
         <item name="android:statusBarColor">@color/launch_background</item>
         <!-- 关键：不要让系统给 MainActivity 再画一层「启动窗口」。
-             头屏 SplashActivity 会先把 MainActivity 拉起来并行预热，系统一看
+             头屏 SplashActivity 会把 MainActivity 拉起来（没有开屏素材时是立刻、
+             有素材时等广告放完，见 SplashActivity 的类注释），系统一看
              新 Activity 要出来，就顺手给 MainActivity 画了张预览窗口盖在最上面——
              它用的是 windowBackground 那张静态图，把下面正在播动画的头屏整个盖住
              并置为 hidden（实测 dumpsys：SplashActivity 的 Surface shown=false、

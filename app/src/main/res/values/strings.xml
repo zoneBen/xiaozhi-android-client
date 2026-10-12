@@ -5,4 +5,8 @@
 
     <!-- 头屏那张纯装饰的动画，给读屏软件一句交代 -->
     <string name="splash_image_description">语音助手正在启动</string>
+
+    <!-- 头屏上运营投放的图片。素材是后台传的，所以只能给一句不描述具体内容的交代，
+         不能让读屏软件去念「活动图」——它对用户没有信息量。 -->
+    <string name="splash_ad_image_description">活动图片</string>
 </resources>
