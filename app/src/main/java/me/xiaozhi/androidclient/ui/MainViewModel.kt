@@ -846,6 +846,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             addLog("检查更新失败：${result.message}")
                         }
                     }
+                    // 本定制版没接在线更新（占位地址不可达）。**不用「失败」这个词**——
+                    // 它是「这个版本没有这个功能」，不是「网络坏了」，说成失败会把用户
+                    // 引去查网络。升级方式就是直接装新版安装包。
+                    is me.xiaozhi.androidclient.ota.UpdateCheckResult.NotConfigured -> {
+                        if (!silent) {
+                            _uiState.update {
+                                it.copy(
+                                    updateCheckStatus = "本定制版未接入在线更新，升级请直接安装新版安装包",
+                                    availableUpdate = null,
+                                )
+                            }
+                            addLog("检查更新：本定制版未接入在线更新（更新源为占位地址）")
+                        }
+                    }
                 }
             } finally {
                 // **只有自己还是"当前那次检查"时才清状态。**

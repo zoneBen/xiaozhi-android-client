@@ -65,6 +65,15 @@ class AppUpdateManager(
 
     suspend fun checkForUpdate(currentVersionCode: Int): UpdateCheckResult = withContext(Dispatchers.IO) {
         runCatching {
+            // 更新源没配就**一个包都不发**，直接回「没这功能」。
+            //
+            // 这必须在下面那三个候选地址之前：本定制版的占位地址是 `.invalid`，
+            // 不拦的话每次检查（含每次冷启动的静默检查）都要白打三个注定失败的请求，
+            // 用户点「检查更新」还会拿到一句英文 DNS 报错。见 `isUpdateIndexConfigured`。
+            if (!isUpdateIndexConfigured(updateIndexUrl)) {
+                return@withContext UpdateCheckResult.NotConfigured
+            }
+
             // 顺序很重要：**镜像优先，GitHub 原链放最后**。
             // raw.githubusercontent.com 在部分网络下不是快速失败而是直接挂住，
             // 把它排在第一个，用户就要先白等一个超时才轮到能用的镜像。
@@ -400,8 +409,21 @@ class AppUpdateManager(
     }
 
     companion object {
+        /**
+         * 更新索引地址。**本定制版刻意留成一个不可达的占位。**
+         *
+         * 原来它指向上游项目的 version.json，那在本定制版里是个**有害**的默认值：
+         * 检查更新会成功查到上游的新版本、然后在「关于」页上劝用户下载安装，
+         * 而那个包装上去会直接覆盖掉本定制版的所有改动。留一个解析不出来的域名，
+         * 「检查更新」就会老老实实地快速失败并如实显示失败——这是本定制版想要的诚实行为。
+         *
+         * `.invalid` 是 RFC 2606 保留的顶级域，保证永远不解析，不会误撞上真实主机。
+         *
+         * 将来真要自建更新源，把这里换成一个**本定制版自己发布**的 version.json 地址；
+         * 不要指回上游。签名校验在 [EXPECTED_SIGNER_SHA256]，两者必须一起改。
+         */
         const val DEFAULT_UPDATE_INDEX_URL =
-            "https://raw.githubusercontent.com/fenghui12/xiaozhi-android-client/dev-main/version.json"
+            "https://update.example.invalid/xiaozhi-android-client/version.json"
 
         /**
          * 本应用签名证书的 SHA-256。**这是防镜像投毒的最后一道闸门，改动前务必想清楚。**

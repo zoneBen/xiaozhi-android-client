@@ -13,6 +13,15 @@ sealed interface UpdateCheckResult {
     data object UpToDate : UpdateCheckResult
     data class HasUpdate(val info: OtaVersionInfo) : UpdateCheckResult
     data class Error(val message: String) : UpdateCheckResult
+
+    /**
+     * 更新源压根没配（本定制版的常态，见 [isUpdateIndexConfigured]）。
+     *
+     * 刻意**不复用 [Error]**：`Error` 会被界面渲染成「检查更新失败: …」+ 一句网络层
+     * 的英文原文，而这里根本不是失败——是这个版本没有这个功能。两者的用户动作完全不同
+     * （一个是查网络，一个是别查了），所以分成两个分支，让编译器逼着每个调用点表态。
+     */
+    data object NotConfigured : UpdateCheckResult
 }
 
 sealed interface DownloadProgressState {

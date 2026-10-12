@@ -106,4 +106,29 @@ class AppUpdateManagerTest {
         val result = updateManager.checkForUpdate(currentVersionCode = 3)
         assertTrue("Expected UpToDate but got $result", result is UpdateCheckResult.UpToDate)
     }
+
+    /**
+     * 本定制版的默认更新源是 `.invalid` 占位。它必须**一个请求都不发**就返回
+     * [UpdateCheckResult.NotConfigured]——既省掉三个注定失败的往返（每次冷启动的
+     * 静默检查也要走一遍），也让用户看到的是「没有这个功能」而不是一句英文 DNS 报错。
+     *
+     * 这里的客户端被塞了一个「一旦发请求就抛错」的拦截器：拦截器抛的是 [AssertionError]
+     * （不是 Exception），`checkForUpdate` 内部的 `runCatching` 拦不住它，所以只要真的
+     * 发了网络请求，这个测试就会红——「没发请求」是被证明的，不是被假设的。
+     */
+    @Test
+    fun checkForUpdate_placeholderUrl_returnsNotConfiguredWithoutAnyRequest() = runBlocking {
+        val noNetworkClient = OkHttpClient.Builder()
+            .addInterceptor { throw AssertionError("占位更新源不该发出任何网络请求") }
+            .build()
+
+        val updateManager = AppUpdateManager(
+            context = android.app.Application(),
+            baseHttpClient = noNetworkClient,
+            updateIndexUrl = AppUpdateManager.DEFAULT_UPDATE_INDEX_URL,
+        )
+
+        val result = updateManager.checkForUpdate(currentVersionCode = 3)
+        assertEquals(UpdateCheckResult.NotConfigured, result)
+    }
 }
