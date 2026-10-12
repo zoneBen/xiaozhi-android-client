@@ -3,6 +3,7 @@ import java.util.Properties
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
+    id("com.google.devtools.ksp")
 }
 
 val releaseSigningProperties = Properties().apply {
@@ -72,8 +73,21 @@ android {
     packaging {
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
+            // android-mail 与 android-activation 各自都带一份 NOTICE/LICENSE，不去重
+            // mergeDebugJavaResource 会直接失败。
+            //
+            // 注意：**千万不要顺手把 META-INF/mailcap 也排掉**。JavaMail 的
+            // MailcapCommandMap 靠它解析 text/plain 的 DataHandler，滤掉之后
+            // 发信会在**运行时**炸（找不到 handler / VerifyError），编译期毫无提示。
+            excludes += "/META-INF/{NOTICE.md,LICENSE.md,DEPENDENCIES,LICENSE,LICENSE.txt,NOTICE,NOTICE.txt,ASL2.0}"
         }
     }
+}
+
+// Room 的 schema 导出目录。导出的 1.json 要提交进版本库——后续改表只有和它 diff
+// 才能看出结构变了，否则迁移就只能靠人回忆。
+ksp {
+    arg("room.schemaLocation", "$projectDir/schemas")
 }
 
 dependencies {
@@ -107,6 +121,17 @@ dependencies {
     implementation("io.coil-kt:coil-compose:2.7.0")
     implementation("com.belerweb:pinyin4j:2.5.1")
     implementation("com.google.zxing:core:3.5.3")
+
+    // 对话历史 / 定时任务 / 执行记录 / 硬件探测缓存
+    implementation("androidx.room:room-runtime:2.6.1")
+    implementation("androidx.room:room-ktx:2.6.1")
+    ksp("androidx.room:room-compiler:2.6.1")
+    // 刻意停在 2.6.1：2.7.x 起要求 Kotlin 2.x 的 KSP，与本项目的 Kotlin 1.9.24 不兼容。
+
+    // 邮件发送。「拍照发到指定邮箱」靠它带附件。
+    // android-activation 是 Android 上没有内置 javax.activation 的补位，两者必须成对。
+    implementation("com.sun.mail:android-mail:1.6.7")
+    implementation("com.sun.mail:android-activation:1.6.7")
 
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.json:json:20231013")
